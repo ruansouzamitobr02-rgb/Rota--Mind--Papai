@@ -202,6 +202,52 @@ export type AdminCloudRestoreStatus = {
   completedAt?: string;
 };
 
+export type AdminPortableBackupPreview = {
+  ticket: string;
+  summary: { files: number; clients: number; routes: number; validatedRoutes: number };
+  message: string;
+};
+
+export async function exportAdminPortableBackup(passphrase: string) {
+  const token = getPanelToken();
+  const headers = new Headers({ "x-backup-passphrase": passphrase });
+  if (token) headers.set("x-panel-token", token);
+  const response = await fetch("/api/admin/portable-backup/export", {
+    method: "POST",
+    headers,
+    signal: AbortSignal.timeout(5 * 60_000)
+  });
+  if (getPanelToken() !== token) throw new Error("A sessão mudou durante a solicitação.");
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || "Não foi possível criar o arquivo portátil.");
+  }
+  return { blob: await response.blob(), filename: response.headers.get("content-disposition")?.match(/filename="([^"]+)"/)?.[1] || "bot-rotas-backup.botbackup" };
+}
+
+export async function previewAdminPortableBackup(file: File, passphrase: string) {
+  const token = getPanelToken();
+  const headers = new Headers({ "Content-Type": "application/octet-stream", "x-backup-passphrase": passphrase });
+  if (token) headers.set("x-panel-token", token);
+  const response = await fetch("/api/admin/portable-backup/preview", {
+    method: "POST",
+    headers,
+    body: file,
+    signal: AbortSignal.timeout(10 * 60_000)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (getPanelToken() !== token) throw new Error("A sessão mudou durante a solicitação.");
+  if (!response.ok) throw new Error(data.error || "Não foi possível validar o arquivo.");
+  return data as AdminPortableBackupPreview;
+}
+
+export function applyAdminPortableBackup(ticket: string) {
+  return fetchJson<{ accepted: boolean; message: string }>("/api/admin/portable-backup/apply", {
+    method: "POST",
+    body: JSON.stringify({ ticket, confirmation: "IMPORTAR DADOS" })
+  });
+}
+
 export function getAdminCloudBackupStatus() {
   return fetchJson<AdminCloudBackupStatus>("/api/admin/cloud-backup");
 }

@@ -6,7 +6,7 @@ const path = require("node:path");
 const test = require("node:test");
 const { gunzipSync } = require("node:zlib");
 
-const { createEncryptedArchive, extractEncryptedArchive, recoverInterruptedCloudRestore } = require("../dist/services/cloudBackup.js");
+const { createEncryptedArchive, createPortableEncryptedArchive, extractEncryptedArchive, recoverInterruptedCloudRestore } = require("../dist/services/cloudBackup.js");
 
 test("backup criptografado compacta os dados persistentes e exclui cache descartavel", async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "rota-backup-test-"));
@@ -69,6 +69,26 @@ test("restaura arquivo criptografado validando conteÃºdo e autenticaÃ§Ã£o"
     assert.ok(progressUpdates.length > 0, "a extração deve informar progresso");
     assert.ok(progressUpdates.every((progress) => progress >= 55 && progress <= 87));
     await assert.rejects(extractEncryptedArchive(output, path.join(temp, "wrong-key"), crypto.randomBytes(32)));
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("arquivo portátil usa senha independente do R2 e recusa senha incorreta", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "rota-portable-backup-test-"));
+  const source = path.join(temp, "source");
+  const output = path.join(temp, "portable.botbackup");
+  const destination = path.join(temp, "restored");
+  fs.mkdirSync(path.join(source, "users"), { recursive: true });
+  fs.writeFileSync(path.join(source, "users", "clientes.json"), "clientes, histórico e preferências");
+  fs.mkdirSync(destination);
+  try {
+    await createPortableEncryptedArchive(source, output, "senha-portatil-segura-123");
+    const encrypted = fs.readFileSync(output);
+    assert.equal(encrypted.subarray(0, 8).toString("ascii"), "RMDBK002");
+    await extractEncryptedArchive(output, destination, "senha-portatil-segura-123");
+    assert.equal(fs.readFileSync(path.join(destination, "users", "clientes.json"), "utf8"), "clientes, histórico e preferências");
+    await assert.rejects(extractEncryptedArchive(output, path.join(temp, "wrong-password"), "senha-errada-123"));
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }

@@ -5747,6 +5747,21 @@ body:has(.modal-backdrop) {
   color: #94a3b8;
 }
 
+.adminx-settings-card input[type="password"],
+.adminx-settings-card input[type="file"] {
+  width: 100%;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid rgba(168, 85, 247, 0.4);
+  border-radius: 8px;
+  color: #f8fafc;
+  background: #11161d;
+}
+
+.adminx-settings-card input[type="file"] {
+  font-size: 12px;
+}
+
 .adminx-backup-picker {
   display: grid;
   gap: 8px;

@@ -3,6 +3,8 @@ import http from "http";
 import os from "os";
 import path from "path";
 import crypto from "crypto";
+import { Transform } from "stream";
+import { pipeline } from "stream/promises";
 import { verifyPassword, verifyPasswordSync } from "./passwords";
 import { HttpError, readJsonBody, readRawBody, RequestRateLimiter, validateAmount, validateEmail } from "./httpSafety";
 import { readJsonFile, writeJsonAtomic } from "./storageJson";
@@ -20,7 +22,7 @@ import { getCurrentRelease, shouldShowCurrentReleaseToClients } from "./releaseN
 import { RomaneioStore } from "./services/romaneio/romaneioStore";
 import { computeConditionalDispatchBlockers, computeConditionalDispatchPriorities, ConditionalPriorityClient } from "./services/conditionalDispatchPriority";
 import { DispatchRaceCoordinator } from "./services/dispatchRaceCoordinator";
-import { applyPreparedCloudRestore, getCloudBackupStatus, getCloudRestoreStatus, listCloudBackupObjects, prepareCloudRestore, recoverInterruptedCloudRestore, runCloudBackup, setCloudRestoreStatus, startCloudBackup, stopCloudBackup } from "./services/cloudBackup";
+import { applyPreparedCloudRestore, createPortableEncryptedArchive, extractEncryptedArchive, getCloudBackupStatus, getCloudRestoreStatus, listCloudBackupObjects, prepareCloudRestore, recoverInterruptedCloudRestore, runCloudBackup, setCloudRestoreStatus, startCloudBackup, stopCloudBackup } from "./services/cloudBackup";
 import { AdminLogEntry, AdminMonitorSnapshot, AdminRoutesSnapshot, AdminSupportMessagesSnapshot, AdminUserDetail, AdminUsersSnapshot, BotSnapshot, DispatchMatchupRule, LeaderContact, PanelUserRole, RouteDispatch, UserPresenceStatus } from "./shared/types";
 
 const port = Number(process.env.PORT || 3000);
@@ -62,7 +64,53 @@ function resolveDataDir() {
 
 const dataDir = resolveDataDir();
 recoverInterruptedCloudRestore(dataDir);
+for (const name of fs.readdirSync(dataDir)) {
+  if (name.startsWith(".cloud-restore-stage-")) fs.rmSync(path.join(dataDir, name), { recursive: true, force: true });
+}
 const currentRelease = getCurrentRelease();
+const portableRestoreTickets = new Map<string, { stageDir: string; createdAt: number }>();
+const MAX_PORTABLE_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
+
+async function savePortableUpload(request: http.IncomingMessage, outputPath: string) {
+  const declaredLength = Number(request.headers["content-length"] || 0);
+  if (declaredLength > MAX_PORTABLE_UPLOAD_BYTES) throw new HttpError(413, "O arquivo ultrapassa o limite de 2 GB.");
+  let received = 0;
+  const limit = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      received += chunk.length;
+      callback(received > MAX_PORTABLE_UPLOAD_BYTES ? new HttpError(413, "O arquivo ultrapassa o limite de 2 GB.") : null, chunk);
+    }
+  });
+  await pipeline(request, limit, fs.createWriteStream(outputPath, { flags: "wx", mode: 0o600 }));
+  if (received < 36) throw new HttpError(400, "O arquivo está vazio ou incompleto.");
+}
+
+function countPortableRestoreFiles(stageDir: string) {
+  const summary = { files: 0, clients: 0, routes: 0, validatedRoutes: 0 };
+  function visit(directory: string) {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) { visit(fullPath); continue; }
+      if (!entry.isFile()) continue;
+      summary.files++;
+      const normalized = fullPath.replace(/\\/g, "/").toLowerCase();
+      if (!normalized.endsWith(".json")) continue;
+      try {
+        const parsed = JSON.parse(fs.readFileSync(fullPath, "utf8")) as unknown;
+        if (normalized.endsWith("/panel_users.json") && Array.isArray(parsed)) {
+          summary.clients = parsed.filter((item) => item && typeof item === "object" && (item as Record<string, unknown>).role === "client").length;
+        }
+        if (normalized.endsWith("/route_history.json") && Array.isArray(parsed)) {
+          summary.routes += parsed.length;
+          summary.validatedRoutes += parsed.filter((item) => item && typeof item === "object"
+            && ((item as Record<string, unknown>).decisionStatus === "validated" || (item as Record<string, unknown>).validated === true)).length;
+        }
+      } catch { /* An optional JSON file can have a different format. */ }
+    }
+  }
+  visit(stageDir);
+  return summary;
+}
 
 type PanelUserRecord = {
   password: string;
@@ -1504,6 +1552,107 @@ const server = http.createServer(async (request, response) => {
         void shutdown(async () => {
           setCloudRestoreStatus(dataDir, { phase: "applying", message: "Servidor parando os bots para aplicar os dados...", sourceKey: preparedRestore.sourceKey, progress: 93 });
           await applyPreparedCloudRestore(dataDir, preparedRestore.stageDir);
+        });
+      }, 100);
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/admin/portable-backup/export") {
+      if (!requireAdmin(authorizedEmail, response)) return;
+      const passphrase = String(request.headers["x-backup-passphrase"] || "");
+      if (passphrase.length < 12 || passphrase.length > 1024) {
+        sendJson(response, 400, { error: "Escolha uma senha com pelo menos 12 caracteres para proteger o arquivo." });
+        return;
+      }
+      const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "rota-mind-portable-"));
+      const archivePath = path.join(tempDir, "bot-rotas.botbackup");
+      try {
+        await createPortableEncryptedArchive(dataDir, archivePath, passphrase);
+        const stat = await fs.promises.stat(archivePath);
+        response.writeHead(200, {
+          "Content-Type": "application/vnd.rota-mind.portable-backup",
+          "Content-Length": stat.size,
+          "Content-Disposition": `attachment; filename="bot-rotas-${new Date().toISOString().slice(0, 10)}.botbackup"`,
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff"
+        });
+        await pipeline(fs.createReadStream(archivePath), response);
+      } finally {
+        await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/admin/portable-backup/preview") {
+      if (!requireAdmin(authorizedEmail, response)) return;
+      const passphrase = String(request.headers["x-backup-passphrase"] || "");
+      if (passphrase.length < 12 || passphrase.length > 1024) {
+        sendJson(response, 400, { error: "Digite a senha usada quando o arquivo foi exportado (mínimo de 12 caracteres)." });
+        return;
+      }
+      for (const [ticketId, ticket] of portableRestoreTickets) {
+        if (Date.now() - ticket.createdAt > 30 * 60_000) {
+          portableRestoreTickets.delete(ticketId);
+          await fs.promises.rm(ticket.stageDir, { recursive: true, force: true }).catch(() => undefined);
+        }
+      }
+      if (portableRestoreTickets.size) {
+        sendJson(response, 409, { error: "Já existe uma restauração portátil aguardando confirmação neste servidor." });
+        return;
+      }
+      const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "rota-mind-upload-"));
+      const archivePath = path.join(tempDir, "upload.botbackup");
+      const stageDir = path.join(dataDir, `.cloud-restore-stage-${crypto.randomUUID()}`);
+      try {
+        await savePortableUpload(request, archivePath);
+        await fs.promises.mkdir(stageDir, { mode: 0o700 });
+        await extractEncryptedArchive(archivePath, stageDir, passphrase);
+        const summary = countPortableRestoreFiles(stageDir);
+        const ticket = crypto.randomUUID();
+        portableRestoreTickets.set(ticket, { stageDir, createdAt: Date.now() });
+        setCloudRestoreStatus(dataDir, {
+          phase: "ready",
+          sourceKey: "Arquivo portátil do iPhone/Arquivos",
+          message: "Arquivo conferido e íntegro. Revise o resumo antes de aplicar.",
+          progress: 90,
+          startedAt: new Date().toISOString()
+        });
+        sendJson(response, 200, { ticket, summary, message: "Arquivo válido. Os dados atuais só serão substituídos após sua confirmação." });
+      } catch (error) {
+        await fs.promises.rm(stageDir, { recursive: true, force: true }).catch(() => undefined);
+        throw error;
+      } finally {
+        await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/admin/portable-backup/apply") {
+      if (!requireAdmin(authorizedEmail, response)) return;
+      const body = await readJsonBody<{ ticket?: string; confirmation?: string }>(request);
+      const pending = body.ticket ? portableRestoreTickets.get(body.ticket) : undefined;
+      if (!pending || Date.now() - pending.createdAt > 30 * 60_000) {
+        if (pending) await fs.promises.rm(pending.stageDir, { recursive: true, force: true }).catch(() => undefined);
+        if (body.ticket) portableRestoreTickets.delete(body.ticket);
+        sendJson(response, 410, { error: "A prévia expirou. Selecione o arquivo novamente." });
+        return;
+      }
+      if (body.confirmation !== "IMPORTAR DADOS") {
+        sendJson(response, 400, { error: "Confirmação inválida. Nenhum dado foi alterado." });
+        return;
+      }
+      portableRestoreTickets.delete(body.ticket!);
+      setCloudRestoreStatus(dataDir, {
+        phase: "ready",
+        sourceKey: "Arquivo portátil do iPhone/Arquivos",
+        message: "Restauração confirmada. O serviço vai reiniciar para aplicar os dados.",
+        progress: 92
+      });
+      sendJson(response, 202, { accepted: true, message: "Arquivo validado. O serviço vai reiniciar e carregar os dados." });
+      setTimeout(() => {
+        void shutdown(async () => {
+          setCloudRestoreStatus(dataDir, { phase: "applying", message: "Aplicando o arquivo portátil...", sourceKey: "Arquivo portátil", progress: 95 });
+          await applyPreparedCloudRestore(dataDir, pending.stageDir);
         });
       }, 100);
       return;

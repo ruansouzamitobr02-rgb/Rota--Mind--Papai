@@ -26,6 +26,7 @@ import {
   Settings,
   ShieldCheck,
   Trash2,
+  Upload,
   UserPlus,
   Users,
   Wifi,
@@ -55,9 +56,13 @@ import {
   AdminCloudBackupStatus,
   AdminCloudBackupObject,
   AdminCloudRestoreStatus,
+  AdminPortableBackupPreview,
+  applyAdminPortableBackup,
+  exportAdminPortableBackup,
   getAdminCloudBackupStatus,
   getAdminCloudBackupObjects,
   getAdminCloudRestoreStatus,
+  previewAdminPortableBackup,
   restoreAdminCloudBackup,
   getAdminMonitor,
   getAdminUserDetail,
@@ -703,6 +708,10 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
   const [cloudBackupListError, setCloudBackupListError] = useState("");
   const [selectedCloudBackupKey, setSelectedCloudBackupKey] = useState("");
   const [cloudRestoreStatus, setCloudRestoreStatus] = useState<AdminCloudRestoreStatus>();
+  const [portableBackupPassphrase, setPortableBackupPassphrase] = useState("");
+  const [portableBackupFile, setPortableBackupFile] = useState<File>();
+  const [portableBackupPreview, setPortableBackupPreview] = useState<AdminPortableBackupPreview>();
+  const [portableBackupBusy, setPortableBackupBusy] = useState(false);
   const [streamState, setStreamState] = useState<"connecting" | "live" | "fallback">("connecting");
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
@@ -832,6 +841,66 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
       showToast(nextError instanceof Error ? nextError.message : "Não foi possível validar o backup para restauração.");
       setCloudRestoreBusy(false);
       void refreshCloudRestoreStatus();
+    }
+  }
+
+  async function exportPortableBackupNow() {
+    if (portableBackupPassphrase.length < 12) {
+      showToast("Crie uma senha com pelo menos 12 caracteres e guarde-a fora do site.");
+      return;
+    }
+    setPortableBackupBusy(true);
+    try {
+      const result = await exportAdminPortableBackup(portableBackupPassphrase);
+      const url = URL.createObjectURL(result.blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = result.filename;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      showToast("Arquivo pronto. Salve em Arquivos no iPhone e guarde a senha.");
+    } catch (nextError) {
+      showToast(nextError instanceof Error ? nextError.message : "Não foi possível exportar o backup.");
+    } finally {
+      setPortableBackupBusy(false);
+    }
+  }
+
+  async function previewPortableBackupNow() {
+    if (!portableBackupFile) {
+      showToast("Escolha primeiro o arquivo .botbackup.");
+      return;
+    }
+    if (portableBackupPassphrase.length < 12) {
+      showToast("Digite a senha usada quando o arquivo foi exportado.");
+      return;
+    }
+    setPortableBackupBusy(true);
+    setPortableBackupPreview(undefined);
+    try {
+      setPortableBackupPreview(await previewAdminPortableBackup(portableBackupFile, portableBackupPassphrase));
+    } catch (nextError) {
+      showToast(nextError instanceof Error ? nextError.message : "Não foi possível validar o arquivo.");
+    } finally {
+      setPortableBackupBusy(false);
+    }
+  }
+
+  async function applyPortableBackupNow() {
+    if (!portableBackupPreview) return;
+    const { clients: clientCount, routes, validatedRoutes } = portableBackupPreview.summary;
+    if (!window.confirm(`O arquivo tem ${clientCount} cliente(s), ${routes} rota(s) (${validatedRoutes} validadas) e ${portableBackupPreview.summary.files} arquivo(s). Os dados atuais deste site serão substituídos; o sistema guarda uma cópia de segurança antes da troca e reinicia. Continuar?`)) return;
+    setPortableBackupBusy(true);
+    try {
+      const result = await applyAdminPortableBackup(portableBackupPreview.ticket);
+      showToast(result.message);
+      setPortableBackupPreview(undefined);
+    } catch (nextError) {
+      showToast(nextError instanceof Error ? nextError.message : "Não foi possível aplicar o arquivo.");
+    } finally {
+      setPortableBackupBusy(false);
     }
   }
 
@@ -2197,6 +2266,52 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
                   <button className="button" disabled={!cloudBackupStatus?.configured || !selectedCloudBackupKey || cloudRestoreBusy || ["listing", "waiting_backup", "downloading", "validating", "ready", "applying"].includes(cloudRestoreStatus?.phase || "")} type="button" onClick={() => void restoreCloudBackupNow()}>
                     {cloudRestoreBusy || ["listing", "waiting_backup", "downloading", "validating", "ready", "applying"].includes(cloudRestoreStatus?.phase || "") ? "Restauração em andamento..." : "Restaurar snapshot selecionado"}
                   </button>
+                </section>
+                <section className="adminx-settings-card">
+                  <FileJson size={20} />
+                  <strong>Arquivo portátil (iPhone / outro site)</strong>
+                  <span>Exporte os dados para um arquivo criptografado. No site novo, escolha esse arquivo e confira o resumo antes de importar.</span>
+                  <label>
+                    <span>Senha do arquivo — guarde-a em outro lugar. Sem ela, não dá para abrir o backup.</span>
+                    <input
+                      autoComplete="new-password"
+                      type="password"
+                      value={portableBackupPassphrase}
+                      onChange={(event) => {
+                        setPortableBackupPassphrase(event.target.value);
+                        setPortableBackupPreview(undefined);
+                      }}
+                      placeholder="Pelo menos 12 caracteres"
+                    />
+                  </label>
+                  <button className="button primary" disabled={portableBackupBusy || portableBackupPassphrase.length < 12} type="button" onClick={() => void exportPortableBackupNow()}>
+                    <Download size={16} /> {portableBackupBusy ? "Preparando arquivo..." : "Exportar para Arquivos"}
+                  </button>
+                  <label>
+                    <span>No site novo, selecione o arquivo .botbackup:</span>
+                    <input
+                      accept=".botbackup,application/vnd.rota-mind.portable-backup,application/octet-stream"
+                      type="file"
+                      onChange={(event) => {
+                        setPortableBackupFile(event.target.files?.[0]);
+                        setPortableBackupPreview(undefined);
+                      }}
+                    />
+                  </label>
+                  {portableBackupFile ? <small>Arquivo selecionado: {portableBackupFile.name} · {formatBackupSize(portableBackupFile.size)}</small> : null}
+                  <button className="button" disabled={portableBackupBusy || !portableBackupFile || portableBackupPassphrase.length < 12} type="button" onClick={() => void previewPortableBackupNow()}>
+                    <Upload size={16} /> {portableBackupBusy ? "Enviando e conferindo..." : "Conferir arquivo"}
+                  </button>
+                  {portableBackupPreview ? (
+                    <section className="adminx-restore-progress phase-ready" aria-live="polite">
+                      <strong>Arquivo válido — confira antes de importar</strong>
+                      <span>{portableBackupPreview.summary.clients} cliente(s) · {portableBackupPreview.summary.routes} rota(s) · {portableBackupPreview.summary.validatedRoutes} validada(s) · {portableBackupPreview.summary.files} arquivo(s)</span>
+                      <span>O site atual só será substituído quando você tocar em “Importar agora”.</span>
+                      <button className="button primary" disabled={portableBackupBusy} type="button" onClick={() => void applyPortableBackupNow()}>
+                        {portableBackupBusy ? "Aplicando..." : "Importar agora"}
+                      </button>
+                    </section>
+                  ) : null}
                 </section>
                 <section className="adminx-settings-card">
                   <Bell size={20} />

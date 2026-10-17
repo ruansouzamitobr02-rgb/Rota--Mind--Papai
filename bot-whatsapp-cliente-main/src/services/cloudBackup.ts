@@ -13,6 +13,8 @@ const BACKUP_PREFIX = "rota-mind-backup-v1";
 // level in the same R2 bucket. Keep them restorable, but never write/prune there.
 const RESTORE_PREFIXES = [BACKUP_PREFIX, "rota-mind-backups/rota-mind-backup-v1"] as const;
 const BACKUP_MAGIC = Buffer.from("RMDBK001", "ascii");
+const PORTABLE_BACKUP_MAGIC = Buffer.from("RMDBK002", "ascii");
+const PORTABLE_SALT_BYTES = 16;
 const DEFAULT_INTERVAL_MS = 15 * 60_000;
 const DEFAULT_RETENTION_DAYS = 30;
 
@@ -170,6 +172,39 @@ export async function createEncryptedArchive(dataDir: string, outputPath: string
   const header = Buffer.concat([BACKUP_MAGIC, iv]);
 
   output.write(header);
+  const completed = pipeline(archive, gzip, cipher, output);
+  try {
+    await addDirectoryToArchive(archive, dataDir, path.dirname(outputPath));
+    archive.finalize();
+    await completed;
+    await fs.promises.appendFile(outputPath, cipher.getAuthTag());
+  } catch (error) {
+    archive.destroy(error instanceof Error ? error : undefined);
+    output.destroy();
+    await fs.promises.unlink(outputPath).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function derivePortableKey(passphrase: string, salt: Buffer) {
+  return new Promise<Buffer>((resolve, reject) => {
+    crypto.scrypt(passphrase, salt, 32, { N: 1 << 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 }, (error, key) => {
+      if (error) reject(error);
+      else resolve(key as Buffer);
+    });
+  });
+}
+
+export async function createPortableEncryptedArchive(dataDir: string, outputPath: string, passphrase: string) {
+  if (passphrase.length < 12 || passphrase.length > 1024) throw new Error("A senha do arquivo precisa ter pelo menos 12 caracteres.");
+  const salt = crypto.randomBytes(PORTABLE_SALT_BYTES);
+  const iv = crypto.randomBytes(12);
+  const key = await derivePortableKey(passphrase, salt);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const output = fs.createWriteStream(outputPath, { flags: "wx", mode: 0o600 });
+  const archive = tar.pack();
+  const gzip = createGzip({ level: 1 });
+  output.write(Buffer.concat([PORTABLE_BACKUP_MAGIC, salt, iv]));
   const completed = pipeline(archive, gzip, cipher, output);
   try {
     await addDirectoryToArchive(archive, dataDir, path.dirname(outputPath));
@@ -347,26 +382,43 @@ function safeArchivePath(root: string, name: string) {
 export async function extractEncryptedArchive(
   archivePath: string,
   destination: string,
-  encryptionKey: Buffer,
+  encryptionKey: Buffer | string,
   onProgress?: (progress: number, message: string) => void
 ) {
   const file = await fs.promises.open(archivePath, "r");
   try {
     const stat = await file.stat();
     if (stat.size < 36) throw new Error("O arquivo de backup estÃ¡ incompleto.");
-    const header = Buffer.alloc(20);
     const tag = Buffer.alloc(16);
-    await file.read(header, 0, 20, 0);
     await file.read(tag, 0, 16, stat.size - 16);
-    if (!header.subarray(0, 8).equals(BACKUP_MAGIC)) throw new Error("Formato de backup desconhecido.");
-    const decipher = crypto.createDecipheriv("aes-256-gcm", encryptionKey, header.subarray(8, 20));
+    const magic = Buffer.alloc(8);
+    await file.read(magic, 0, 8, 0);
+    const isPortable = magic.equals(PORTABLE_BACKUP_MAGIC);
+    if (!isPortable && !magic.equals(BACKUP_MAGIC)) throw new Error("Formato de backup desconhecido.");
+    const headerSize = isPortable ? 36 : 20;
+    if (stat.size < headerSize + 16) throw new Error("O arquivo de backup estÃ¡ incompleto.");
+    const header = Buffer.alloc(headerSize - 8);
+    await file.read(header, 0, header.length, 8);
+    let key: Buffer;
+    let iv: Buffer;
+    if (isPortable) {
+      if (typeof encryptionKey !== "string") throw new Error("Este arquivo portÃ¡til precisa da senha escolhida na exportaÃ§Ã£o.");
+      if (encryptionKey.length < 12 || encryptionKey.length > 1024) throw new Error("A senha precisa ter pelo menos 12 caracteres.");
+      key = await derivePortableKey(encryptionKey, header.subarray(0, PORTABLE_SALT_BYTES));
+      iv = header.subarray(PORTABLE_SALT_BYTES);
+    } else {
+      if (typeof encryptionKey === "string") throw new Error("Este snapshot do R2 usa a chave configurada no servidor antigo.");
+      key = encryptionKey;
+      iv = header.subarray(0, 12);
+    }
+    const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
     decipher.setAuthTag(tag);
     const extract = tar.extract();
     let entryCount = 0;
     let expandedBytes = 0;
     let processedBytes = 0;
     let lastReportedBytes = 0;
-    const encryptedPayloadBytes = Math.max(1, stat.size - 36);
+    const encryptedPayloadBytes = Math.max(1, stat.size - headerSize - 16);
     const progress = new Transform({
       transform(chunk: Buffer, _encoding, callback) {
         processedBytes += chunk.length;
@@ -402,7 +454,7 @@ export async function extractEncryptedArchive(
       }
     });
     await pipeline(
-      fs.createReadStream(archivePath, { start: 20, end: stat.size - 17 }),
+      fs.createReadStream(archivePath, { start: headerSize, end: stat.size - 17 }),
       progress,
       decipher,
       createGunzip(),
