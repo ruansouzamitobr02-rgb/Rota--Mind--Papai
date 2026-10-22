@@ -3056,22 +3056,6 @@ function PanelApp() {
   }, []);
 
   useEffect(() => {
-    if (!authenticated || userRole === "admin") return;
-    const refreshAfterBackground = () => {
-      if (document.visibilityState !== "visible") return;
-      void botApi.getSnapshot().then(setSnapshot).catch(() => undefined);
-    };
-    document.addEventListener("visibilitychange", refreshAfterBackground);
-    window.addEventListener("focus", refreshAfterBackground);
-    window.addEventListener("pageshow", refreshAfterBackground);
-    return () => {
-      document.removeEventListener("visibilitychange", refreshAfterBackground);
-      window.removeEventListener("focus", refreshAfterBackground);
-      window.removeEventListener("pageshow", refreshAfterBackground);
-    };
-  }, [authenticated, userRole]);
-
-  useEffect(() => {
     if (!authenticated || window.botApi) return;
     let mounted = true;
     getReleaseNotice()

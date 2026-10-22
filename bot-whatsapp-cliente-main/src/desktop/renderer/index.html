@@ -13,9 +13,24 @@
     <link rel="icon" type="image/png" sizes="512x512" href="/br-skull-icon-512-v6.png" />
     <link rel="apple-touch-icon" href="/br-skull-icon-512-v6.png" />
     <title>Bot WhatsApp</title>
+    <style>
+      .app-recovery-screen { min-height:100vh; min-height:100dvh; display:grid; place-items:center; padding:24px; box-sizing:border-box; color:#f5edff; background:#08030d; font:16px/1.5 system-ui,sans-serif; }
+      .app-recovery-screen section { max-width:360px; padding:24px; border:1px solid #704398; border-radius:20px; background:#140b1e; }
+      .app-recovery-screen h1 { font-size:22px; margin:0 0 12px; }
+      .app-recovery-screen p { color:#c2afcf; }
+      .app-recovery-screen button { width:100%; padding:14px; border:0; border-radius:12px; color:#fff; background:#7540b5; font:inherit; font-weight:700; cursor:pointer; }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <main class="app-recovery-screen" role="status">
+        <section>
+          <h1>Abrindo o painel</h1>
+          <p>Carregando seu acesso salvo. Se a conexão voltou e a tela não abrir, toque abaixo.</p>
+          <button type="button" onclick="window.location.reload()">Abrir painel novamente</button>
+        </section>
+      </main>
+    </div>
     <script type="module" src="/main.tsx"></script>
   </body>
 </html>

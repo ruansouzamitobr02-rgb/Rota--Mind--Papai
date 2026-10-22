@@ -5,7 +5,8 @@ const path = require("node:path");
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bot-desktop-audit-"));
 const env = { ...process.env, DESKTOP_AUDIT_DATA_DIR: directory };
 delete env.ELECTRON_RUN_AS_NODE;
-const child = spawn(require("electron"), [path.join(__dirname, "audit-desktop.cjs")], { env, stdio: "inherit", windowsHide: true });
+const auditScript = process.argv[2] === "audit-web-resume.cjs" ? "audit-web-resume.cjs" : "audit-desktop.cjs";
+const child = spawn(require("electron"), [path.join(__dirname, auditScript)], { env, stdio: "inherit", windowsHide: true });
 const deadline = setTimeout(() => { console.error("Desktop audit timed out"); child.kill(); }, 45_000);
 child.on("error", (error) => { console.error(error.message); process.exitCode = 1; });
 child.on("exit", (code) => {

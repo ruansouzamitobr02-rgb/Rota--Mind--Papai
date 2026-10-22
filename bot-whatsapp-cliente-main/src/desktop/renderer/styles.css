@@ -8678,7 +8678,7 @@ body {
 
 .app-shell:not(.admin-shell) .mobile-home,
 .app-shell:not(.admin-shell) .tab-stack {
-  animation: liquid-page-in 360ms var(--ease-ios) both !important;
+  animation: liquid-page-in 360ms var(--ease-ios) backwards !important;
   transform-origin: 50% 20%;
 }
 
@@ -8703,7 +8703,7 @@ body {
 }
 
 .app-shell:not(.admin-shell) .mobile-home > * {
-  animation: liquid-card-in 420ms var(--ease-ios) both;
+  animation: liquid-card-in 420ms var(--ease-ios) backwards;
 }
 
 .app-shell:not(.admin-shell) .mobile-home > :nth-child(2) { animation-delay: 35ms; }
@@ -8874,7 +8874,7 @@ body {
 
 @keyframes liquid-page-in {
   from { opacity: 0; transform: translateY(12px) scale(0.985); filter: blur(3px); }
-  to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+  to { opacity: 1; transform: none; filter: none; }
 }
 
 @keyframes liquid-dialog-in {
@@ -9299,7 +9299,7 @@ body,
 
   .app-shell:not(.admin-shell) .mobile-home,
   .app-shell:not(.admin-shell) .tab-stack {
-    animation: liquid-mobile-page-in 190ms ease-out both !important;
+    animation: liquid-mobile-page-in 190ms ease-out backwards !important;
   }
 
   .app-shell:not(.admin-shell) .mobile-home > * {
@@ -9386,7 +9386,38 @@ body,
 
 @keyframes liquid-mobile-page-in {
   from { opacity: 0; transform: translate3d(8px, 0, 0); }
-  to { opacity: 1; transform: translate3d(0, 0, 0); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Resume with plain painted content before animations/compositing start again. */
+.app-resuming #root .mobile-home,
+.app-resuming #root .tab-stack,
+.app-resuming #root .mobile-home > * {
+  animation: none !important;
+}
+
+.app-resuming #root .log-list,
+.app-resuming #root .ocr-analysis-history-list,
+.app-resuming #root .automatic-analysis-routes,
+.app-resuming #root .adminx-table-wrap {
+  content-visibility: visible;
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .app-shell:not(.admin-shell) .mobile-home,
+  .app-shell:not(.admin-shell) .tab-stack {
+    animation: none !important;
+    transform: none;
+    filter: none;
+  }
+
+  .log-list,
+  .ocr-analysis-history-list,
+  .automatic-analysis-routes,
+  .adminx-table-wrap {
+    content-visibility: visible;
+    contain-intrinsic-size: none;
+  }
 }
 
 .foreground-sparks {

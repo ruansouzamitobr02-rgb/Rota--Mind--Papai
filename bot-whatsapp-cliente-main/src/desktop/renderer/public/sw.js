@@ -1,4 +1,4 @@
-const CACHE_NAME = "bot-rotas-shell-v7";
+const CACHE_NAME = "bot-rotas-shell-v8";
 const SHELL_ASSETS = ["/manifest.webmanifest", "/br-skull-icon-192-v6.png", "/br-skull-icon-512-v6.png", "/br-skull-icon-maskable-512-v6.png"];
 
 self.addEventListener("install", (event) => {

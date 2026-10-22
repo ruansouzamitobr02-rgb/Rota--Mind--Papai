@@ -22,6 +22,7 @@ import {
   SaveWarmupMessageSettingsPayload
 } from "../../shared/types";
 import { subscribeSnapshots } from "./snapshotSubscription";
+import { parseClientSnapshot } from "./clientSnapshot";
 
 export const PANEL_SESSION_CHANGED = "panel-session-changed";
 
@@ -512,18 +513,20 @@ function action<TPayload = unknown>(name: string, payload?: TPayload) {
   return fetchJson<BotSnapshot>(`/api/action/${name}`, {
     method: "POST",
     body: JSON.stringify(payload || {})
-  });
+  }).then(parseClientSnapshot);
 }
 
-function createSnapshotListener<T>(url: string) {
+function createSnapshotListener<T>(url: string, parse?: (value: unknown) => T) {
   if (!("EventSource" in window)) return undefined;
   return (receive: (snapshot: T) => void, fail: () => void) => {
     const source = new EventSource(url);
     source.onmessage = (event) => {
       let snapshot: T;
       try {
-        snapshot = JSON.parse(event.data) as T;
+        const data = JSON.parse(event.data);
+        snapshot = parse ? parse(data) : data as T;
       } catch {
+        fail();
         return;
       }
       receive(snapshot);
@@ -536,7 +539,7 @@ function createSnapshotListener<T>(url: string) {
 function createWebApi(): DesktopApi {
   return {
     reportRendererHeartbeat: () => undefined,
-    getSnapshot: () => fetchJson<BotSnapshot>("/api/snapshot"),
+    getSnapshot: () => fetchJson<BotSnapshot>("/api/snapshot").then(parseClientSnapshot),
     startBot: () => action("start"),
     stopBot: () => action("stop"),
     restartBot: () => action("restart"),
@@ -573,8 +576,8 @@ function createWebApi(): DesktopApi {
     onSnapshot: (callback: (snapshot: BotSnapshot) => void, onError?: (error: unknown) => void) => {
       const token = getPanelToken();
       return subscribeSnapshots({
-        load: (signal) => fetchJson<BotSnapshot>("/api/snapshot", { signal }),
-        listen: token ? createSnapshotListener<BotSnapshot>(`/events?token=${encodeURIComponent(token)}`) : undefined,
+        load: (signal) => fetchJson<BotSnapshot>("/api/snapshot", { signal }).then(parseClientSnapshot),
+        listen: token ? createSnapshotListener<BotSnapshot>(`/events?token=${encodeURIComponent(token)}`, parseClientSnapshot) : undefined,
         receive: (snapshot) => { if (getPanelToken() === token) callback(snapshot); },
         onError,
         intervalMs: 1000,

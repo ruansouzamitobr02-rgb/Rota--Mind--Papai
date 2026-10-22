@@ -18,7 +18,8 @@
     "test": "npm run build:main && node --test tests/*.test.js",
     "desktop:build": "npm run build && electron-builder --win",
     "desktop:pack": "npm run build && electron-builder --dir",
-    "test:desktop": "npm run build && node scripts/run-desktop-audit.cjs"
+    "test:desktop": "npm run build && node scripts/run-desktop-audit.cjs",
+    "test:web-resume": "npm run build && npm run build:main && node scripts/run-desktop-audit.cjs audit-web-resume.cjs"
   },
   "build": {
     "appId": "com.botwhatsapp.desktop",
