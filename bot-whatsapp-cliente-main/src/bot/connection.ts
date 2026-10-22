@@ -2553,8 +2553,6 @@ export class BotService extends EventEmitter {
     const groupJid = batch[0].groupJid;
     const config = this.configStore.load();
     const analysisSocket = this.sock;
-    if (config.targetDispatchMode !== "ocr" || !analysisSocket || !this.monitoringEnabled) return;
-
     // All clients receiving the same set of images coordinate the same event,
     // even when WhatsApp delivered that set in a different order.
     const messageId = [...new Set(batch.map((item) => item.messageId))].sort().join("+");
@@ -2565,6 +2563,7 @@ export class BotService extends EventEmitter {
     let imagePreviewUrl: string | undefined;
     let previewPromise: Promise<void> = Promise.resolve();
     let dispatchRaceReady = false;
+    let analysisWatchdog: NodeJS.Timeout | undefined;
     const isCurrent = () => sequence === this.latestRouteImageSequence && this.monitoringEnabled && this.configStore.load().targetDispatchMode === "ocr";
     const reportState = (state: DispatchRaceEventState) => this.dispatchRaceEventReporter?.({
       clientEmail: this.clientEmail, groupKey: groupJid, eventDetectedAt: analysisStartedAtMs, eventKey: messageId, state
@@ -2577,6 +2576,26 @@ export class BotService extends EventEmitter {
         analysisFinishedAt: new Date(finishedAt).toISOString(),
         analysisDurationMs: Math.max(0, finishedAt - analysisStartedAtMs)
       };
+    };
+    const failCurrentAnalysis = (message: string) => {
+      if (this.ocrRouteSelection.analysisId !== analysisId || this.ocrRouteSelection.status !== "analyzing") return;
+      this.latestRouteImageSequence += 1;
+      this.pendingOcrMessages = [];
+      this.preparedMessages = [];
+      this.preparedRelayMessages = [];
+      this.pendingOcrReconnectDispatch = undefined;
+      this.ocrRouteSelection = { ...this.ocrRouteSelection, status: "error", processedAt: new Date().toISOString(), message };
+      this.rememberCurrentOcrAnalysis();
+      this.emitSnapshot();
+    };
+    const readOcrWithTimeout = (imagePath: string, options: { maxReadings: number; fastFirst: boolean; preferCageCrop: boolean }) => {
+      let timeout: NodeJS.Timeout | undefined;
+      const deadline = new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error("A leitura da imagem ultrapassou o limite de tempo.")), 125_000);
+        timeout.unref?.();
+      });
+      return Promise.race([readRouteImageOcrWithoutBlockingSocket(imagePath, options), deadline])
+        .finally(() => { if (timeout) clearTimeout(timeout); });
     };
 
     try {
@@ -2591,6 +2610,14 @@ export class BotService extends EventEmitter {
       this.preparedRelayMessages = [];
       this.pendingOcrReconnectDispatch = undefined;
       this.emitSnapshot();
+      analysisWatchdog = setTimeout(() => {
+        failCurrentAnalysis("A leitura demorou mais de 3 minutos e foi interrompida por segurança. Nenhuma rota desta imagem será enviada; feche o aviso e tente novamente.");
+        reportState("unavailable");
+      }, 3 * 60_000);
+      analysisWatchdog.unref?.();
+      if (config.targetDispatchMode !== "ocr" || !analysisSocket || !this.monitoringEnabled) {
+        throw new Error("O monitoramento foi parado ou a conexão mudou antes de a leitura começar.");
+      }
       const preferences = this.getConfiguredOcrPreferences(config);
       if (!config.nomeEnvio.trim()) throw new Error("Configure o nome de envio antes de analisar.");
 
@@ -2600,7 +2627,7 @@ export class BotService extends EventEmitter {
       const imagePaths = batch.map((_item, index) => path.join(imageDirectory!, `${index}.jpg`));
       for (let index = 0; index < batch.length; index += 1) {
         const buffer = await this.downloadRouteImage(batch[index].msg, analysisSocket);
-        if (!isCurrent()) return;
+        if (!isCurrent()) { failCurrentAnalysis("A leitura foi interrompida porque o bot ou as preferências mudaram. Nenhuma rota foi enviada."); return; }
         await fs.promises.writeFile(imagePaths[index], buffer);
       }
       // The OCR keeps using the original complete image. This compact copy is
@@ -2622,15 +2649,15 @@ export class BotService extends EventEmitter {
       })();
       let readings = [];
       for (const imagePath of imagePaths) {
-        if (!isCurrent()) return;
+        if (!isCurrent()) { failCurrentAnalysis("A leitura foi interrompida porque o bot ou as preferências mudaram. Nenhuma rota foi enviada."); return; }
         // Start with one higher-resolution structural reading. Most screenshots
         // are tabular and do not benefit from making several OCR workers compete
         // for CPU before we know that a second interpretation is necessary.
-        readings.push(await readRouteImageOcrWithoutBlockingSocket(imagePath, {
+        readings.push(await readOcrWithTimeout(imagePath, {
           maxReadings: 1, fastFirst: true, preferCageCrop: false
         }));
       }
-      if (!isCurrent()) return;
+      if (!isCurrent()) { failCurrentAnalysis("A leitura foi interrompida porque o bot ou as preferências mudaram. Nenhuma rota foi enviada."); return; }
       let ocr = combineRouteImageBatch(readings);
       let decision = selectPreferredNeighborhoodFromOcr(ocr, preferences, config.ocrMaxStops, config.ocrMaxPackages, config.ocrRouteChoiceMode, config.ocrRouteChoiceMetric);
       const selectedMetrics = decision.selections.map(({ detection }) => detection);
@@ -2642,12 +2669,12 @@ export class BotService extends EventEmitter {
       if (needsReinforcedReading) {
         readings = [];
         for (const imagePath of imagePaths) {
-          if (!isCurrent()) return;
-          readings.push(await readRouteImageOcrWithoutBlockingSocket(imagePath, {
+          if (!isCurrent()) { failCurrentAnalysis("A leitura foi interrompida porque o bot ou as preferências mudaram. Nenhuma rota foi enviada."); return; }
+          readings.push(await readOcrWithTimeout(imagePath, {
             maxReadings: 5, fastFirst: true, preferCageCrop: false
           }));
         }
-        if (!isCurrent()) return;
+        if (!isCurrent()) { failCurrentAnalysis("A leitura foi interrompida porque o bot ou as preferências mudaram. Nenhuma rota foi enviada."); return; }
         ocr = combineRouteImageBatch(readings);
         decision = selectPreferredNeighborhoodFromOcr(ocr, preferences, config.ocrMaxStops, config.ocrMaxPackages, config.ocrRouteChoiceMode, config.ocrRouteChoiceMetric);
       }
@@ -2745,7 +2772,10 @@ export class BotService extends EventEmitter {
       this.emitSnapshot();
     } catch (error) {
       dispatchRaceReady = false;
-      if (!isCurrent()) return;
+      if (!isCurrent()) {
+        failCurrentAnalysis("A análise foi interrompida porque o bot ou as preferências mudaram. Nenhuma rota foi enviada.");
+        return;
+      }
       this.emit("image-analysis", { id: analysisId, messageId, result: "failed", ...analysisContext() });
       this.ocrRouteSelection = {
         status: "error", analysisId, options: [], processedAt: new Date().toISOString(),
@@ -2756,6 +2786,7 @@ export class BotService extends EventEmitter {
       this.emitSnapshot();
       this.logger.warning(`Análise da IA falhou: ${this.getErrorMessage(error)}`);
     } finally {
+      if (analysisWatchdog) clearTimeout(analysisWatchdog);
       await previewPromise;
       if (!dispatchRaceReady || !isCurrent()) reportState("unavailable");
       if (sequence === this.latestRouteImageSequence) {

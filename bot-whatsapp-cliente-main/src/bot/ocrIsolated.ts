@@ -13,7 +13,7 @@ type PendingRequest = {
 };
 
 const OCR_WORKER_TIMEOUT_MS = 120_000;
-const RETRYABLE_WORKER_ERROR = /SIGBUS|encerrou inesperadamente|worker da IA falhou|EPIPE|excedeu/i;
+const RETRYABLE_WORKER_ERROR = /SIGBUS|encerrou inesperadamente|worker da IA falhou|EPIPE/i;
 const pendingRequests = new Map<string, PendingRequest>();
 let worker: ChildProcess | undefined;
 let requestSequence = 0;

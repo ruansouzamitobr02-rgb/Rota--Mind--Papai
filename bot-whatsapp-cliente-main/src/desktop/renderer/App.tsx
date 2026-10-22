@@ -2784,7 +2784,10 @@ function AutomaticOcrAnalysisDialog({ selection, onClose, onConfirm, busy = fals
             <p className="panel-label">Bot imagem automático</p>
             <h2 id="automatic-analysis-title">{analyzing ? "Analisando a imagem" : selection.dispatchState === "sent" ? "Rotas enviadas!" : selection.status === "confirmed" ? "Rota pronta" : "Imagem verificada"}</h2>
           </div>
-          {finished ? <button className="icon-button" title="Fechar" type="button" onClick={onClose}><X size={20} /></button> : <span className="mini-badge">PROCESSANDO</span>}
+          <div className="automatic-analysis-heading-actions">
+            {analyzing ? <span className="mini-badge">PROCESSANDO</span> : null}
+            <button className="icon-button" title="Fechar análise e continuar usando o painel" aria-label="Fechar análise" type="button" onClick={onClose}><X size={20} /></button>
+          </div>
         </div>
         <div className="automatic-analysis-steps">
           <article className="analysis-step done"><CheckCircle2 size={19} /><span><strong>Imagem recebida</strong><small>O servidor recebeu a foto do grupo.</small></span></article>

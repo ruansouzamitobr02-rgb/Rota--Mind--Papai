@@ -8324,6 +8324,13 @@ body,
   box-shadow: 0 28px 90px rgba(0, 0, 0, 0.78), 0 0 42px rgba(15, 125, 245, 0.2);
 }
 
+.automatic-analysis-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
 .automatic-analysis-steps {
   display: grid;
   gap: 9px;

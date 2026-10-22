@@ -143,7 +143,33 @@ test("parar durante download descarta a analise e nao prepara envio", async (t) 
   downloadRelease.resolve();
   await analysis;
   assert.deepEqual(bot.pendingOcrMessages, []);
+  assert.equal(bot.ocrRouteSelection.status, "error");
+  assert.match(bot.ocrRouteSelection.message, /interrompida/);
   assert.deepEqual(states.map((event) => event.state), ["processing", "unavailable"]);
+});
+
+test("analise recebida sem conexao termina com erro em vez de ficar processando", async (t) => {
+  const { bot } = createBot(t);
+  bot.sock = undefined;
+  await bot.processRouteImageBatch(batch("offline-before-ocr"), 1);
+  assert.equal(bot.ocrRouteSelection.status, "error");
+  assert.match(bot.ocrRouteSelection.message, /conexão mudou/);
+  assert.deepEqual(bot.pendingOcrMessages, []);
+});
+
+test("parar enquanto a leitura OCR aguarda encerra a análise sem deixar o popup preso", async (t) => {
+  const { bot } = createBot(t);
+  const ocrStarted = deferred();
+  const releaseOcr = deferred();
+  mockReading(t, async () => { ocrStarted.resolve(); await releaseOcr.promise; return reading(["A-1 Cidade Centro"]); });
+  const analysis = bot.processRouteImageBatch(batch("stop-during-ocr"), 1);
+  await ocrStarted.promise;
+  bot.disableMonitoring();
+  releaseOcr.resolve();
+  await analysis;
+  assert.equal(bot.ocrRouteSelection.status, "error");
+  assert.match(bot.ocrRouteSelection.message, /interrompida/);
+  assert.deepEqual(bot.pendingOcrMessages, []);
 });
 
 test("dois clientes com a mesma imagem usam temporarios independentes", async (t) => {
