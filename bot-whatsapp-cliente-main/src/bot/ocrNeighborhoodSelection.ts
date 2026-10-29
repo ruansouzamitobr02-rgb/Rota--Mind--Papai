@@ -27,10 +27,12 @@ export function findManualRouteCandidatesFromOcr(ocr: RouteOcrResult): DetectedR
       if (codes.size !== 1) continue;
       const code = [...codes][0];
       const bairro = String(row.districtText || row.trailingCellText || "").trim();
+      const regiao = bairro ? matchPreference(row, { cidade: "", bairro })?.regiao : row.localityText;
       const detection: DetectedRouteCode & { variant: number } = {
         route: bairro || row.text,
         cidade: String(row.localityText || "").trim() || undefined,
         bairro: bairro || undefined,
+        ...(regiao ? { regiao } : {}),
         ...extractQuantitiesAfterAt(row),
         code,
         line: row.text,
@@ -235,11 +237,25 @@ export function selectPreferredNeighborhoodFromOcr(
       (!normalizedMaxPackages || item.detection.pacotes === undefined || item.detection.pacotes <= normalizedMaxPackages) &&
       !exceedsIndividualCondition(item));
     const excludedCount = selections.length - eligibleSelections.length;
+    const describeBlockedRoute = (item: NeighborhoodSelection["selections"][number]) => {
+      const { detection } = item;
+      const preference = configured.find((candidate) => candidate.index === item.preferenceIndex);
+      const violations: string[] = [];
+      if (normalizedMaxStops && detection.paradas !== undefined && detection.paradas > normalizedMaxStops) {
+        violations.push(`${detection.paradas} paradas acima do limite geral de ${normalizedMaxStops}`);
+      }
+      if (normalizedMaxPackages && detection.pacotes !== undefined && detection.pacotes > normalizedMaxPackages) {
+        violations.push(`${detection.pacotes} pacotes acima do limite geral de ${normalizedMaxPackages}`);
+      }
+      if (preference?.conditionMax && exceedsIndividualCondition(item)) {
+        const metric = preference.conditionMetric === "packages" ? "pacotes" : "paradas";
+        violations.push(`${metric === "pacotes" ? detection.pacotes : detection.paradas} ${metric} acima da condição desse bairro (${preference.conditionMax})`);
+      }
+      return `${detection.code}: ${detection.bairro}${detection.regiao ? ` / ${detection.regiao}` : ""} confirmado${detection.regiao ? "s" : ""}; bloqueio por ${violations.join("; ")}.`;
+    };
     if (!eligibleSelections.length) return {
       status: "unsafe",
-      reason: normalizedMaxStops || normalizedMaxPackages
-        ? `Todos os bairros encontrados ultrapassaram ${formatLimits(normalizedMaxStops, normalizedMaxPackages)}. Nenhuma mensagem foi enviada.`
-        : "Todos os bairros encontrados ultrapassaram suas condições individuais. Nenhuma mensagem foi enviada.",
+      reason: `Encontrei rotas para suas preferências, mas os limites de quantidade bloquearam o envio automático. ${selections.map(describeBlockedRoute).join(" ")} Revise os limites nas preferências. Nenhuma mensagem foi enviada.`,
       detections,
       selections: []
     };

@@ -9,6 +9,7 @@ type Props = {
   targetMode?: "manual" | "ocr";
   config: BotConfig;
   groups: BotGroup[];
+  detectedRegions?: string[];
   busy: boolean;
   onRefresh: () => void;
   onSave: (
@@ -71,7 +72,7 @@ function createEmptyRoute(): MonitoredRoute {
   return { cidade: "", bairro: "", enabled: true };
 }
 
-export function GroupMessageCard({ kind, targetMode = "manual", config, groups, busy, onRefresh, onSave, onSaveManual, onWarmup }: Props) {
+export function GroupMessageCard({ kind, targetMode = "manual", config, groups, detectedRegions = [], busy, onRefresh, onSave, onSaveManual, onWarmup }: Props) {
   const [group, setGroup] = useState("");
   const [selectedGroupId, setSelectedGroupId] = useState("");
   const [senderName, setSenderName] = useState("");
@@ -100,6 +101,15 @@ export function GroupMessageCard({ kind, targetMode = "manual", config, groups, 
   );
   const savedCodesKey = savedCodes.join("\n");
   const savedPreferencesKey = JSON.stringify(getNeighborhoodPreferences(config));
+  const regionChoices = useMemo(() => {
+    const choices = new Map<string, string>();
+    for (const value of [...(config.rotasMonitoradasDetalhadas || []).map((route) => route.regiao || ""), ...detectedRegions]) {
+      const region = value.trim().replace(/\s+/g, " ");
+      const key = region.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      if (key && !choices.has(key)) choices.set(key, region);
+    }
+    return [...choices.values()].sort((left, right) => left.localeCompare(right, "pt-BR"));
+  }, [savedPreferencesKey, detectedRegions]);
   const nextPreferences = normalizeMonitoredRoutes(monitoredRoutes);
   const activePreferences = getEnabledNeighborhoodPreferences(nextPreferences);
   const hasIncompletePreference = monitoredRoutes.some((route) => !route.bairro.trim());
@@ -300,6 +310,18 @@ export function GroupMessageCard({ kind, targetMode = "manual", config, groups, 
               </label>
               <small>Acima desse número a rota é descartada e o bot tenta a próxima opção válida do ranking de bairros.</small>
             </div>
+            <section className={`ocr-quantity-limit-notice ${ocrMaxStops || ocrMaxPackages ? "has-limits" : ""}`} aria-live="polite">
+              <strong>{ocrMaxStops || ocrMaxPackages ? "Estes limites bloqueiam o envio" : "Sem limites gerais de quantidade"}</strong>
+              <span>{ocrMaxStops || ocrMaxPackages
+                ? `Só passam rotas com ${[ocrMaxStops ? `até ${ocrMaxStops} paradas` : "", ocrMaxPackages ? `até ${ocrMaxPackages} pacotes` : ""].filter(Boolean).join(" e ")}. Isso vale mesmo quando o bairro e a região estão corretos.`
+                : "O bot segue os bairros, regiões e condições individuais. A quantidade serve para ordenar as rotas, sem um teto geral."}</span>
+              {ocrMaxStops || ocrMaxPackages ? (
+                <button className="button secondary" disabled={busy} type="button" onClick={() => {
+                  setOcrMaxStops(0);
+                  setOcrMaxPackages(0);
+                }}>Remover limites gerais</button>
+              ) : null}
+            </section>
             </div>
             <div className="ocr-settings-section ocr-preferences-section">
             <div className="ocr-settings-title">
@@ -330,38 +352,44 @@ export function GroupMessageCard({ kind, targetMode = "manual", config, groups, 
                   }}
                   placeholder="Bairro: Parque Penha"
                 />
-                {route.regiao !== undefined ? (
-                  <div className="preference-region">
-                    <label>
-                      <span>Somente nesta região</span>
-                      <input
-                        aria-label={`Região da preferência ${index + 1}`}
-                        maxLength={200}
-                        disabled={busy}
-                        value={route.regiao}
-                        placeholder="Ex.: Campos - Tamandaré"
-                        onChange={(event) => {
-                          const nextRoutes = [...monitoredRoutes];
-                          nextRoutes[index] = { ...route, regiao: event.target.value };
-                          setMonitoredRoutes(nextRoutes);
-                        }}
-                      />
-                    </label>
-                    <small>Copie o nome completo da coluna Região/Cluster. O bot precisa confirmar bairro e região na mesma linha.</small>
-                    <button className="link-button danger-link" disabled={busy} type="button" onClick={() => {
-                      const { regiao: _regiao, ...withoutRegion } = route;
-                      const nextRoutes = [...monitoredRoutes];
-                      nextRoutes[index] = withoutRegion;
-                      setMonitoredRoutes(nextRoutes);
-                    }}>Remover restrição de região</button>
-                  </div>
-                ) : (
-                  <button className="link-button add-region-button" disabled={busy} type="button" onClick={() => {
-                    const nextRoutes = [...monitoredRoutes];
-                    nextRoutes[index] = { ...route, regiao: "" };
-                    setMonitoredRoutes(nextRoutes);
-                  }}>+ Restringir região</button>
-                )}
+                <div className="preference-region">
+                  <label>
+                    <span>Região deste bairro</span>
+                    <select
+                      aria-label={`Escolher região da preferência ${index + 1}`}
+                      disabled={busy}
+                      value={route.regiao === undefined ? "" : regionChoices.includes(route.regiao) ? route.regiao : "__custom__"}
+                      onChange={(event) => {
+                        const nextRoutes = [...monitoredRoutes];
+                        if (!event.target.value) {
+                          const { regiao: _regiao, ...withoutRegion } = route;
+                          nextRoutes[index] = withoutRegion;
+                        } else nextRoutes[index] = { ...route, regiao: event.target.value === "__custom__" ? "" : event.target.value };
+                        setMonitoredRoutes(nextRoutes);
+                      }}
+                    >
+                      <option value="">Qualquer região (sem restrição)</option>
+                      {regionChoices.map((region) => <option key={region} value={region}>{region}</option>)}
+                      <option value="__custom__">Digitar outra região...</option>
+                    </select>
+                  </label>
+                  {route.regiao !== undefined && !regionChoices.includes(route.regiao) ? (
+                    <input
+                      aria-label={`Região da preferência ${index + 1}`}
+                      maxLength={200}
+                      disabled={busy}
+                      value={route.regiao}
+                      placeholder="Ex.: Campos - Tamandaré"
+                      onChange={(event) => {
+                        const nextRoutes = [...monitoredRoutes];
+                        nextRoutes[index] = { ...route, regiao: event.target.value };
+                        setMonitoredRoutes(nextRoutes);
+                      }}
+                    />
+                  ) : null}
+                  <small>{route.regiao ? `Só aceita ${route.bairro || "este bairro"} na região ${route.regiao}.`
+                    : "Escolha uma região lida nas imagens para separar bairros com o mesmo nome."}</small>
+                </div>
                 {route.conditionMetric ? (
                   <div className="preference-condition">
                     <select

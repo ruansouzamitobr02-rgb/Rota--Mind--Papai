@@ -13,8 +13,13 @@ let connections = 0;
 let invalid = false;
 const snapshot = {
   status: "disconnected", groupState: "unknown", qrCode: "",
-  config: { ...DEFAULT_CONFIG, nomeEnvio: "Cliente de teste" },
-  groups: [], logs: [], readinessChecks: [], routeDispatches: [], statusEvents: []
+  config: {
+    ...DEFAULT_CONFIG, nomeEnvio: "Cliente de teste", grupoAlvoJid: "test@g.us", grupoAlvoNome: "Grupo teste",
+    rotasMonitoradas: ["Centro"], rotasMonitoradasDetalhadas: [{ cidade: "", bairro: "Centro", regiao: "Campos - Tamandaré", enabled: true }],
+    ocrMaxStops: 10, ocrMaxPackages: 20
+  },
+  groups: [{ id: "test@g.us", name: "Grupo teste" }], logs: [], readinessChecks: [], routeDispatches: [], statusEvents: [],
+  ocrAnalysisHistory: [{ status: "ready", analysisId: "region-fixture", options: [{ regiao: "Campos Tamandaré" }, { regiao: "Campos - Centro" }] }]
 };
 const server = http.createServer((request, response) => {
   const pathname = new URL(request.url, "http://localhost").pathname;
@@ -88,6 +93,32 @@ const deadline = setTimeout(() => { console.error("Web resume audit timed out");
   await window.webContents.executeJavaScript(`document.querySelector('.bottom-nav button').click()`);
   await waitFor(window, "Boolean(document.querySelector('.mobile-home'))", "navegação ficou sem resposta após retomar");
   console.log("PASS: app móvel retoma, refaz SSE, recusa snapshot parcial e preserva login, formulário e navegação.");
+
+  await window.webContents.executeJavaScript(`document.querySelectorAll('.bottom-nav button')[1].click()`);
+  await waitFor(window, "document.querySelector('.ocr-quantity-limit-notice')?.textContent.includes('10 paradas')", "limites salvos não aparecem na tela principal");
+  await window.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(button=>button.textContent==='Configurar bairros').click()`);
+  await waitFor(window, "Boolean(document.querySelector('.preference-region select'))", "seletor de regiões não abriu");
+  const regionEditor = await window.webContents.executeJavaScript(`(() => {
+    const selector = document.querySelector('.preference-region select');
+    const choices = Array.from(selector.options).map(option=>option.value);
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(selector,'Campos - Centro');
+    selector.dispatchEvent(new Event('change',{bubbles:true}));
+    return {choices, region:selector.value};
+  })()`);
+  assert.ok(regionEditor.choices.includes('Campos - Tamandaré') && regionEditor.choices.includes('Campos - Centro'));
+  assert.equal(regionEditor.region, 'Campos - Centro');
+  await window.webContents.executeJavaScript(`
+    const selector = document.querySelector('.preference-region select');
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(selector,'Campos - Tamandaré');
+    selector.dispatchEvent(new Event('change',{bubbles:true}));
+    Array.from(document.querySelectorAll('button')).find(button=>button.textContent==='Remover limites gerais').click();
+  `);
+  await waitFor(window, `document.querySelector('input[aria-label="Limite geral de paradas"]').value === ''`, "botão não removeu o limite de paradas");
+  assert.deepEqual(await window.webContents.executeJavaScript(`({
+    packages:document.querySelector('input[aria-label="Limite geral de pacotes"]').value,
+    region:document.querySelector('.preference-region select').value
+  })`), { packages: '', region: 'Campos - Tamandaré' });
+  console.log("PASS: regiões selecionadas sem digitar, limites 10/20 visíveis e remoção explícita preserva Tamandaré.");
 
   const boundary = new BrowserWindow({ show: false, webPreferences: { nodeIntegration: true, contextIsolation: false, backgroundThrottling: false } });
   await boundary.loadURL(base + "/boundary-test");

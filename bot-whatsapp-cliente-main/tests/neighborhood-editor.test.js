@@ -136,7 +136,7 @@ test("editor salva bairros visíveis e sua nova ordem, sem reutilizar códigos o
 test("editor adiciona condicao somente ao bairro escolhido", () => {
   const editor = renderEditor();
   editor.click(editor.find((node) => node.type === "button" && node.props.className === "link-button add-condition-button"));
-  editor.change(editor.find((node) => node.type === "select" && /1$/.test(node.props["aria-label"] || "")), "packages");
+  editor.change(editor.find((node) => node.props["aria-label"] === "Tipo da condição da preferência 1"), "packages");
   editor.change(editor.find((node) => node.type === "input" && node.props.type === "number" && /1$/.test(node.props["aria-label"] || "")), "90");
   editor.submit();
   assert.deepEqual(JSON.parse(JSON.stringify(editor.saved[0][8])), [{
@@ -178,15 +178,43 @@ test("editor pausa e reativa uma preferência sem apagar bairro ou ordem", () =>
 test("editor salva e remove a restrição regional sem transformar campo vazio em qualquer região", () => {
   const editor = renderEditor();
   editor.change(editor.find((node) => node.props["aria-label"] === "Bairro da preferência 1"), "Centro");
-  editor.click(editor.find((node) => node.type === "button" && node.props.className === "link-button add-region-button"));
+  editor.change(editor.find((node) => node.props["aria-label"] === "Escolher região da preferência 1"), "__custom__");
   editor.submit();
   assert.equal(editor.saved.length, 0, "região adicionada e vazia deve impedir o salvamento");
   editor.change(editor.find((node) => node.props["aria-label"] === "Região da preferência 1"), "Campos - Tamandaré");
   editor.submit();
   assert.equal(editor.saved[0][8][0].regiao, "Campos - Tamandaré");
-  editor.click(editor.find((node) => node.type === "button" && node.props.children === "Remover restrição de região"));
+  editor.change(editor.find((node) => node.props["aria-label"] === "Escolher região da preferência 1"), "");
   editor.submit();
   assert.equal(editor.saved[1][8][0].regiao, undefined);
+});
+
+test("região lida na imagem pode ser escolhida sem digitar", () => {
+  const editor = renderEditor({ detectedRegions: ["Campos Tamandaré", "Campos - Centro"] });
+  editor.change(editor.find((node) => node.props["aria-label"] === "Bairro da preferência 1"), "Centro");
+  const selector = editor.find((node) => node.props["aria-label"] === "Escolher região da preferência 1");
+  assert.ok(editor.all((node) => node.type === "option" && node.props.value === "Campos Tamandaré").length);
+  editor.change(selector, "Campos Tamandaré");
+  assert.equal(editor.all((node) => node.props["aria-label"] === "Região da preferência 1").length, 0);
+  editor.submit();
+  assert.equal(editor.saved[0][8][0].regiao, "Campos Tamandaré");
+});
+
+test("limites 10 e 20 só são removidos por ação explícita e região continua salva", () => {
+  const editor = renderEditor({ config: {
+    grupoAlvoJid: "test@g.us", grupoAlvoNome: "Grupo teste", nomeEnvio: "Cliente",
+    codigosMensagensAlvo: [], rotasMonitoradas: ["Centro"], routePresets: [],
+    rotasMonitoradasDetalhadas: [{ cidade: "", bairro: "Centro", regiao: "Campos - Tamandaré" }],
+    testMessageCount: 15, testMessageIntervalMs: 0, ocrMaxStops: 10, ocrMaxPackages: 20
+  } });
+  editor.submit();
+  assert.equal(editor.saved[0][11], 10);
+  assert.equal(editor.saved[0][12], 20);
+  editor.click(editor.find((node) => node.type === "button" && node.props.children === "Remover limites gerais"));
+  editor.submit();
+  assert.equal(editor.saved[1][11], 0);
+  assert.equal(editor.saved[1][12], 0);
+  assert.equal(editor.saved[1][8][0].regiao, "Campos - Tamandaré");
 });
 
 test("editor do target mantém códigos manuais e não aplica preferências da IA", () => {

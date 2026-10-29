@@ -2698,6 +2698,7 @@ export class BotService extends EventEmitter {
           gaiola: candidate.code,
           bairro: candidate.bairro || "Destino não confirmado",
           cidade: candidate.cidade,
+          regiao: candidate.regiao,
           distanciaKm: 0, pacotes: candidate.pacotes || 0, paradas: candidate.paradas || 0,
           passedFilters: false,
           reasons: ["Rota detectada na imagem; exige confirmação manual antes do envio."],

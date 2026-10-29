@@ -3733,6 +3733,24 @@ body:has(.modal-backdrop) {
 .preference-region small { color: var(--hub-muted); }
 .preference-region input { width: 100%; min-width: 0; }
 .preference-region .danger-link { justify-self: start; }
+
+.preference-region select { width: 100%; min-width: 0; }
+
+.ocr-quantity-limit-notice {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 12px;
+}
+
+.ocr-quantity-limit-notice.has-limits {
+  border-color: rgba(245, 158, 11, 0.5);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.ocr-quantity-limit-notice span { color: var(--hub-muted); }
 .add-condition-button { justify-self: start; font-size: 0.75rem; }
 .danger-link { color: #ff9fa8; font-size: 0.72rem; }
 

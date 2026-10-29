@@ -2819,7 +2819,9 @@ function AutomaticOcrAnalysisDialog({ selection, onClose, onConfirm, busy = fals
                 <button key={option.id} type="button" className={manualIds.includes(option.id) ? "manual-route-option selected" : "manual-route-option"} onClick={() => toggleManualOption(option.id)}>
                   <span className="manual-route-check">{manualIds.includes(option.id) ? "✓" : ""}</span>
                   <strong>{option.gaiola}</strong><span>{option.bairro}</span>
-                  {option.cidade ? <small>{option.cidade}</small> : null}
+                  {option.regiao ? <small>Região: {option.regiao}</small> : option.cidade ? <small>{option.cidade}</small> : null}
+                  {option.paradas ? <small>{option.paradas} paradas</small> : null}
+                  {option.pacotes ? <small>{option.pacotes} pacotes</small> : null}
                   {option.observation ? <small>{option.observation}</small> : null}
                 </button>
               ))}
@@ -3091,6 +3093,10 @@ function PanelApp() {
   }, [automaticOcrAnalysisOpen, snapshot.ocrRouteSelection?.analysisId, snapshot.ocrRouteSelection?.processedAt, snapshot.ocrRouteSelection?.status]);
 
   const neighborhoodPreferences = getNeighborhoodPreferences(snapshot.config);
+  const detectedRegions = useMemo(() => [...new Set([
+    ...(snapshot.ocrRouteSelection?.options || []),
+    ...(snapshot.ocrAnalysisHistory || []).flatMap((analysis) => analysis.options || [])
+  ].map((option) => option.regiao || "").filter(Boolean))], [snapshot.ocrRouteSelection, snapshot.ocrAnalysisHistory]);
 
   const groupLabel = useMemo(() => {
     return snapshot.config.grupoAlvoNome || "Nenhum grupo alvo";
@@ -3766,10 +3772,19 @@ function PanelApp() {
               </div>
               <button className="button" disabled={busy} type="button" onClick={() => setGroupEditor("image")}>Editar preferências</button>
             </div>
-            <p className="approval-message">O bot escolhe uma única gaiola: a do primeiro bairro da sua lista que aparecer com leitura segura na imagem. Bairros parecidos ou associações duvidosas não liberam o envio.</p>
+            <p className="approval-message">O bot confere bairro e região, aplica os limites e depois ordena {snapshot.config.ocrRouteChoiceMode === "preference" ? "pela sua preferência" : `pelo menor número de ${snapshot.config.ocrRouteChoiceMetric === "packages" ? "pacotes" : "paradas"}`}. Pode enviar até {snapshot.config.ocrCageMessageLimit || 3} rota(s) por imagem.</p>
+            <div className={`ocr-quantity-limit-notice ${snapshot.config.ocrMaxStops || snapshot.config.ocrMaxPackages ? "has-limits" : ""}`}>
+              <strong>{snapshot.config.ocrMaxStops || snapshot.config.ocrMaxPackages ? "Limites gerais que podem bloquear o envio" : "Sem limites gerais de paradas ou pacotes"}</strong>
+              {snapshot.config.ocrMaxStops || snapshot.config.ocrMaxPackages ? (
+                <>
+                  <span>{[snapshot.config.ocrMaxStops ? `Máximo de ${snapshot.config.ocrMaxStops} paradas` : "", snapshot.config.ocrMaxPackages ? `máximo de ${snapshot.config.ocrMaxPackages} pacotes` : ""].filter(Boolean).join(" e ")}. Mesmo com bairro e região corretos, acima disso não envia automaticamente.</span>
+                  <button className="button" disabled={busy} type="button" onClick={() => setGroupEditor("image")}>Revisar limites</button>
+                </>
+              ) : null}
+            </div>
             <div className="confirmation-details">
               {neighborhoodPreferences.length ? neighborhoodPreferences.map((route, index) => (
-                <span key={`${route.cidade}-${route.bairro}`}>{index + 1}ª preferência: {neighborhoodPreferenceLabel(route)}{route.enabled === false ? " — pausada" : ""}</span>
+                <span key={`${route.bairro}-${route.regiao || ""}-${index}`}>{index + 1}ª preferência: {neighborhoodPreferenceLabel(route)}{route.enabled === false ? " — pausada" : ""}</span>
               )) : <span>Adicione seus bairros preferidos antes de iniciar o bot imagem.</span>}
             </div>
           </section>
@@ -3924,6 +3939,7 @@ function PanelApp() {
               targetMode={groupEditor === "image" ? "ocr" : "manual"}
               config={snapshot.config}
               groups={snapshot.groups}
+              detectedRegions={detectedRegions}
               busy={busy}
               onRefresh={() => runAction(botApi.refreshGroups)}
               onSave={groupEditor === "target" || groupEditor === "image" ? confirmSaveTarget : confirmSaveTest}

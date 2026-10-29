@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { selectPreferredNeighborhoodFromOcr } = require("../dist/bot/ocrNeighborhoodSelection");
+const { selectPreferredNeighborhoodFromOcr, findManualRouteCandidatesFromOcr } = require("../dist/bot/ocrNeighborhoodSelection");
 const { ConfigStore } = require("../dist/bot/config");
 const { normalizeNeighborhoodPreferences, neighborhoodPreferenceLabel } = require("../dist/desktop/renderer/neighborhoodPreferences");
 
@@ -52,6 +52,21 @@ test("Centro de outra região ou sem região legível nunca libera o automático
     assert.notEqual(result.status, "selected");
     assert.deepEqual(result.selections, []);
   }
+});
+
+test("caso relatado confirma Tamandaré e explica bloqueio por 10 paradas e 20 pacotes", () => {
+  const source = consensus([{ ...desired, region: "Campos Tamandaré" }, other]);
+  const blocked = selectPreferredNeighborhoodFromOcr(source, [preference], 10, 20);
+  assert.equal(blocked.status, "unsafe");
+  assert.match(blocked.reason, /J-29: Centro \/ Campos Tamandaré confirmados/);
+  assert.match(blocked.reason, /27 paradas acima do limite geral de 10/);
+  assert.match(blocked.reason, /99 pacotes acima do limite geral de 20/);
+  const candidates = findManualRouteCandidatesFromOcr(source);
+  assert.equal(candidates.find((candidate) => candidate.code === "J-29").regiao, "Campos Tamandaré");
+  const withoutLimits = selectPreferredNeighborhoodFromOcr(source, [preference], 0, 0);
+  assert.equal(withoutLimits.status, "selected");
+  assert.equal(withoutLimits.detection.code, "J-29");
+  assert.ok(withoutLimits.selections.every((item) => item.detection.code !== "J-21"));
 });
 
 test("CLUSTER continua sendo isolado quando também existe uma coluna CIDADE", () => {
