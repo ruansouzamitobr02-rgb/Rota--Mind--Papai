@@ -419,6 +419,7 @@ export class RouteStore {
             route: typeof input.ocr.route === "string" ? input.ocr.route : undefined,
             cidade: typeof input.ocr.cidade === "string" ? input.ocr.cidade : undefined,
             bairro: typeof input.ocr.bairro === "string" ? input.ocr.bairro : undefined,
+            regiao: typeof input.ocr.regiao === "string" ? input.ocr.regiao : undefined,
             code: typeof input.ocr.code === "string" ? input.ocr.code : undefined,
             paradas: Number.isFinite(Number(input.ocr.paradas)) ? Number(input.ocr.paradas) : undefined,
             pacotes: Number.isFinite(Number(input.ocr.pacotes)) ? Number(input.ocr.pacotes) : undefined,

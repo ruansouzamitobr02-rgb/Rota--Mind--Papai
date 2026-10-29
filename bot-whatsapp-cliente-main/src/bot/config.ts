@@ -170,6 +170,7 @@ export class ConfigStore {
             .map((item: any) => ({
               cidade: typeof item?.cidade === "string" ? item.cidade.trim() : "",
               bairro: typeof item?.bairro === "string" ? item.bairro.trim() : "",
+              ...(typeof item?.regiao === "string" && item.regiao.trim() ? { regiao: item.regiao.trim() } : {}),
               enabled: item?.enabled !== false,
               ...(item?.conditionMetric === "stops" || item?.conditionMetric === "packages" ? {
                 conditionMetric: item.conditionMetric,
@@ -187,6 +188,7 @@ export class ConfigStore {
                 ? preset.routes.map((item: any) => ({
                     cidade: "",
                     bairro: typeof item?.bairro === "string" ? item.bairro.trim() : "",
+                    ...(typeof item?.regiao === "string" && item.regiao.trim() ? { regiao: item.regiao.trim() } : {}),
                     enabled: item?.enabled !== false,
                     ...(item?.conditionMetric === "stops" || item?.conditionMetric === "packages" ? {
                       conditionMetric: item.conditionMetric,

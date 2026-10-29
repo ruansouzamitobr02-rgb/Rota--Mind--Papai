@@ -175,6 +175,20 @@ test("editor pausa e reativa uma preferência sem apagar bairro ou ordem", () =>
   assert.equal(editor.find((node) => node.props["aria-label"] === "Pausar preferência 1").props["aria-checked"], true);
 });
 
+test("editor salva e remove a restrição regional sem transformar campo vazio em qualquer região", () => {
+  const editor = renderEditor();
+  editor.change(editor.find((node) => node.props["aria-label"] === "Bairro da preferência 1"), "Centro");
+  editor.click(editor.find((node) => node.type === "button" && node.props.className === "link-button add-region-button"));
+  editor.submit();
+  assert.equal(editor.saved.length, 0, "região adicionada e vazia deve impedir o salvamento");
+  editor.change(editor.find((node) => node.props["aria-label"] === "Região da preferência 1"), "Campos - Tamandaré");
+  editor.submit();
+  assert.equal(editor.saved[0][8][0].regiao, "Campos - Tamandaré");
+  editor.click(editor.find((node) => node.type === "button" && node.props.children === "Remover restrição de região"));
+  editor.submit();
+  assert.equal(editor.saved[1][8][0].regiao, undefined);
+});
+
 test("editor do target mantém códigos manuais e não aplica preferências da IA", () => {
   const editor = renderEditor({ targetMode: "manual" });
   assert.equal(editor.all((node) => node.props["aria-label"] === "Bairro da preferência 1").length, 0);

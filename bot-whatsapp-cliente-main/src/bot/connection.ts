@@ -10,7 +10,7 @@ import { resolveGroup, normalizarTexto } from "./group";
 import { BotLogger } from "./logger";
 import { combineRouteImageBatch, DetectedRouteCode, extractNeighborhoodAfterCity, findAllGaiolaCodesFromOcr, findAllPlannedAtCodesFromOcr, findNeighborhoodInOcrLine, isSafeAutomaticGaiolaDetection, reconcileGaiolaDetectionsWithRomaneio } from "./ocr";
 import { readRouteImageOcrWithoutBlockingSocket, warmupIsolatedOcrWorker } from "./ocrIsolated";
-import { canonicalConfiguredNeighborhood, findManualRouteCandidatesFromOcr, selectPreferredNeighborhoodFromOcr } from "./ocrNeighborhoodSelection";
+import { canonicalConfiguredNeighborhood, findManualRouteCandidatesFromOcr, normalizeRegionIdentity, selectPreferredNeighborhoodFromOcr } from "./ocrNeighborhoodSelection";
 import { DispatchQueueStore } from "./dispatchQueue";
 import { OcrAnalysisHistoryStore } from "./ocrAnalysisHistoryStore";
 import { RouteStore } from "./routeStore";
@@ -1697,6 +1697,7 @@ export class BotService extends EventEmitter {
       .map((item) => ({
         cidade: "",
         bairro: String(item?.bairro || "").trim(),
+        ...(typeof item?.regiao === "string" && item.regiao.trim() ? { regiao: item.regiao.trim() } : {}),
         enabled: item?.enabled !== false,
         ...(item?.conditionMetric === "stops" || item?.conditionMetric === "packages" ? {
           conditionMetric: item.conditionMetric,
@@ -1735,6 +1736,7 @@ export class BotService extends EventEmitter {
     const normalizedRoutes = routes
       .map((route) => ({
         cidade: "", bairro: String(route?.bairro || "").trim(),
+        ...(typeof route?.regiao === "string" && route.regiao.trim() ? { regiao: route.regiao.trim() } : {}),
         enabled: route?.enabled !== false,
         ...(route?.conditionMetric === "stops" || route?.conditionMetric === "packages" ? {
           conditionMetric: route.conditionMetric,
@@ -2654,7 +2656,7 @@ export class BotService extends EventEmitter {
         // are tabular and do not benefit from making several OCR workers compete
         // for CPU before we know that a second interpretation is necessary.
         readings.push(await readOcrWithTimeout(imagePath, {
-          maxReadings: 1, fastFirst: true, preferCageCrop: false
+          maxReadings: preferences.some((preference) => preference.regiao) ? 2 : 1, fastFirst: true, preferCageCrop: false
         }));
       }
       if (!isCurrent()) { failCurrentAnalysis("A leitura foi interrompida porque o bot ou as preferências mudaram. Nenhuma rota foi enviada."); return; }
@@ -2732,18 +2734,19 @@ export class BotService extends EventEmitter {
           id: `neighborhood::${analysisId}::${preferenceIndex}::${detection.code}`,
           rank: rank + 1, rota: detection.route, gaiola: detection.code,
           bairro: preference.bairro, cidade: detection.cidade,
+          regiao: detection.regiao,
           distanciaKm: 0, pacotes: detection.pacotes || 0, paradas: detection.paradas || 0,
           passedFilters: true,
           reasons: [`Preferência ${preferenceIndex + 1}: ${preference.bairro}`, "Bairro e gaiola conferidos na mesma linha em leituras concordantes.", detection.paradas ? `${detection.paradas} paradas identificadas após o AT.` : "", detection.pacotes ? `${detection.pacotes} pacotes identificados.` : ""].filter(Boolean),
           score: detection.confidence,
-          observation: "Selecionado diretamente da imagem, sem romaneio."
+          observation: `${detection.regiao ? `Região: ${detection.regiao}. ` : ""}Selecionado diretamente da imagem, sem romaneio.`
         };
       });
       const option = options[0];
       this.lastOcrDispatchKey = `${groupJid}:${messageId}:${options.map((item) => item.gaiola).join(",")}`;
       this.lastOcrInsight = {
         analysisId, source: ocr.source, text: ocr.text, line: detected.line,
-        route: detected.route, cidade: option.cidade, bairro: option.bairro,
+        route: detected.route, cidade: option.cidade, bairro: option.bairro, regiao: option.regiao,
         code: detected.code, paradas: option.paradas, pacotes: option.pacotes, confidence: detected.confidence, processedAt: new Date().toISOString(),
         imagePreviewUrl, analysisOptions: options, analysisTiming: { ...timing, totalMs: comparedAt - analysisStartedAtMs },
         analysisMessage: decision.reason,
@@ -2830,6 +2833,7 @@ export class BotService extends EventEmitter {
       route: first.rota,
       cidade: first.cidade,
       bairro: first.bairro,
+      regiao: first.regiao,
       code: first.gaiola,
       paradas: first.paradas,
       pacotes: first.pacotes,
@@ -3073,14 +3077,23 @@ export class BotService extends EventEmitter {
   }
 
   private findOcrConditionViolation(options: OcrRouteOption[], config = this.configStore.load()) {
-    const preferences = (config.rotasMonitoradasDetalhadas || []).filter((preference) =>
-      preference.enabled !== false && preference.conditionMetric && Number(preference.conditionMax) > 0
-    );
+    const preferences = (config.rotasMonitoradasDetalhadas || []).filter((preference) => preference.enabled !== false);
     for (const option of options) {
-      const preference = preferences.find((candidate) =>
+      const sameNeighborhood = preferences.filter((candidate) =>
         normalizarTexto(canonicalConfiguredNeighborhood(candidate.bairro)) ===
           normalizarTexto(canonicalConfiguredNeighborhood(option.bairro))
       );
+      const compatible = sameNeighborhood.filter((candidate) => !candidate.regiao || option.regiao
+        && normalizeRegionIdentity(candidate.regiao) === normalizeRegionIdentity(option.regiao));
+      if (sameNeighborhood.length && !compatible.length) {
+        return `${option.bairro}: a região ${option.regiao || "não identificada"} não corresponde à região configurada. Envio automático bloqueado.`;
+      }
+      if (compatible.some((candidate) => {
+        if (!candidate.conditionMetric || !(Number(candidate.conditionMax) > 0)) return true;
+        const value = candidate.conditionMetric === "packages" ? option.pacotes : option.paradas;
+        return value === undefined || value <= Number(candidate.conditionMax);
+      })) continue;
+      const preference = compatible[0];
       if (!preference?.conditionMetric || !(Number(preference.conditionMax) > 0)) continue;
       const label = preference.conditionMetric === "packages" ? "pacotes" : "paradas";
       const value = preference.conditionMetric === "packages" ? option.pacotes : option.paradas;
@@ -5017,7 +5030,7 @@ export class BotService extends EventEmitter {
     return false;
   }
 
-  private getConfiguredOcrPreferences(config = this.configStore.load()) {
+  private getConfiguredOcrPreferences(config = this.configStore.load()): MonitoredRoute[] {
     const savedDetailed = config.rotasMonitoradasDetalhadas.filter((item) => item.bairro.trim());
     if (savedDetailed.length) return savedDetailed.filter((item) => item.enabled !== false).map((item) => ({ ...item, cidade: "" }));
     return config.rotasMonitoradas.map((query) => {
@@ -5029,7 +5042,7 @@ export class BotService extends EventEmitter {
   private describeConfiguredOcrRoutes(config = this.configStore.load()) {
     const detailed = (config.rotasMonitoradasDetalhadas || [])
       .filter((item) => item.bairro?.trim())
-      .map((item) => item.bairro);
+      .map((item) => item.regiao ? `${item.bairro} (${item.regiao})` : item.bairro);
     if (detailed.length) return detailed.join(" | ");
     return (config.rotasMonitoradas || []).join(" | ") || "nenhuma rota configurada";
   }

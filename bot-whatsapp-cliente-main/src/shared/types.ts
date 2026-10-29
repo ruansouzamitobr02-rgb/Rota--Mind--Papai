@@ -72,6 +72,8 @@ export type DispatchPriorityProfile = {
 export type MonitoredRoute = {
   cidade: string;
   bairro: string;
+  /** Optional exact CLUSTER/region required on the same image row. */
+  regiao?: string;
   /** Missing on older saved configurations means enabled. */
   enabled?: boolean;
   /** Optional maximum applied only to this neighborhood. */
@@ -206,6 +208,7 @@ export type OcrRouteOption = {
   rota: string;
   gaiola: string;
   bairro: string;
+  regiao?: string;
   bairroPercentual?: number;
   cidade?: string;
   distanciaKm: number;
@@ -493,6 +496,7 @@ export type RouteOcrInsight = {
   route?: string;
   cidade?: string;
   bairro?: string;
+  regiao?: string;
   code?: string;
   paradas?: number;
   pacotes?: number;

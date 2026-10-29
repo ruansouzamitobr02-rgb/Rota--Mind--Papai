@@ -4,13 +4,14 @@ function preferenceKey(value: string) {
   return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("pt-BR");
 }
 
-/** Preserve the client's order and distinguish equal neighborhood names in different cities. */
+/** Preserve order and distinguish equal neighborhood names with different region restrictions. */
 export function normalizeNeighborhoodPreferences(routes: MonitoredRoute[]): MonitoredRoute[] {
   const seen = new Set<string>();
   return routes
     .map((route) => ({
       cidade: "",
       bairro: String(route?.bairro || "").trim().replace(/\s+/g, " "),
+      ...(typeof route?.regiao === "string" && route.regiao.trim() ? { regiao: route.regiao.trim().replace(/\s+/g, " ") } : {}),
       enabled: route?.enabled !== false,
       ...(route?.conditionMetric === "stops" || route?.conditionMetric === "packages"
         ? { conditionMetric: route.conditionMetric, conditionMax: Math.max(0, Math.min(999, Math.floor(Number(route.conditionMax) || 0))) }
@@ -18,7 +19,7 @@ export function normalizeNeighborhoodPreferences(routes: MonitoredRoute[]): Moni
     }))
     .filter((route) => {
       if (!route.bairro) return false;
-      const key = preferenceKey(route.bairro);
+      const key = `${preferenceKey(route.bairro)}::${preferenceKey(route.regiao || "")}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -43,6 +44,7 @@ export function moveNeighborhoodPreference(routes: MonitoredRoute[], fromIndex: 
 }
 
 export function neighborhoodPreferenceLabel(route: MonitoredRoute) {
-  if (!route.conditionMetric || !(Number(route.conditionMax) > 0)) return route.bairro;
-  return `${route.bairro} — até ${route.conditionMax} ${route.conditionMetric === "packages" ? "pacotes" : "paradas"}`;
+  const label = route.regiao ? `${route.bairro} · ${route.regiao}` : route.bairro;
+  if (!route.conditionMetric || !(Number(route.conditionMax) > 0)) return label;
+  return `${label} — até ${route.conditionMax} ${route.conditionMetric === "packages" ? "pacotes" : "paradas"}`;
 }

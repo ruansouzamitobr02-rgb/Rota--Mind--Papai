@@ -11,7 +11,7 @@ export type NeighborhoodSelection = {
 };
 
 type Row = { text: string; words: OcrLine["words"]; confidence: number; districtText?: string; localityText?: string; trailingCellText?: string; paradas?: number; pacotes?: number };
-type Match = { row: Row; code: string; confidence: number; variant: number; paradas?: number; pacotes?: number; requiresThreeEvidence?: boolean };
+type Match = { row: Row; code: string; confidence: number; variant: number; regiao?: string; paradas?: number; pacotes?: number; requiresThreeEvidence?: boolean };
 
 export function findManualRouteCandidatesFromOcr(ocr: RouteOcrResult): DetectedRouteCode[] {
   const variants = ocr.variants?.length ? ocr.variants : [ocr];
@@ -55,6 +55,22 @@ export function normalizeNeighborhoodIdentity(value: string) {
     .toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
+export function normalizeRegionIdentity(value: string) {
+  return normalizeNeighborhoodIdentity(value)
+    .replace(/^campos dos goytacazes(?= |$)/, "campos")
+    .replace(/^sao joao da barra(?= |$)/, "sjb")
+    .replace(/^sao francisco de itabapoana(?= |$)/, "sfi");
+}
+
+function regionBeforeDistrict(tail: string, district: string) {
+  const normalizedDistrict = normalizeNeighborhoodIdentity(district);
+  if (!normalizeNeighborhoodIdentity(tail).endsWith(` ${normalizedDistrict}`)) return undefined;
+  const words = [...tail.matchAll(/[\p{L}\p{N}]+/gu)];
+  const districtStart = words[words.length - normalizedDistrict.split(" ").length]?.index;
+  if (districtStart === undefined) return undefined;
+  return tail.slice(0, districtStart).replace(/[\s|;,:\-\u2013\u2014]+$/, "").trim() || undefined;
+}
+
 /**
  * Older configurations sometimes stored the CLUSTER label in the bairro
  * field (for example "Campos - Flamboyant"). Screenshots with a BAIRRO
@@ -72,7 +88,7 @@ export function canonicalConfiguredNeighborhood(value: string) {
 
 /**
  * Selection deliberately does not use fuzzy matching or the romaneio. A row
- * must contain the complete configured city and neighborhood, and two OCR
+ * must contain the complete configured neighborhood and optional region, and two OCR
  * treatments must agree on its literal cage code. Uncertainty in a preferred
  * neighborhood blocks selection instead of silently choosing a lower priority.
  */
@@ -87,6 +103,7 @@ export function selectPreferredNeighborhoodFromOcr(
   const configured = preferences.map((preference, index) => ({
     cidade: String(preference.cidade || "").trim(),
     bairro: canonicalConfiguredNeighborhood(preference.bairro),
+    regiao: String(preference.regiao || "").trim(),
     index,
     enabled: preference.enabled !== false,
     conditionMetric: preference.conditionMetric,
@@ -105,6 +122,7 @@ export function selectPreferredNeighborhoodFromOcr(
 
   for (const preference of configured) {
     const matches: Match[] = [];
+    const regionConflicts = new Set<string>();
     for (const [variant, variantRows] of rows.entries()) {
       // A neighborhood can legitimately have multiple cages. Read every row
       // so the product can choose the cage with fewer stops instead of merely
@@ -112,6 +130,13 @@ export function selectPreferredNeighborhoodFromOcr(
       for (const row of variantRows) {
         const match = matchPreference(row, preference);
         if (match) matches.push({ row, ...match, variant });
+        else if (preference.regiao) {
+          const otherRegion = matchPreference(row, preference, true);
+          if (otherRegion?.code && otherRegion.regiao && otherRegion.confidence >= 65
+            && normalizeRegionIdentity(otherRegion.regiao) !== normalizeRegionIdentity(preference.regiao)) {
+            regionConflicts.add(otherRegion.code);
+          }
+        }
       }
     }
     if (!matches.length) continue;
@@ -140,13 +165,14 @@ export function selectPreferredNeighborhoodFromOcr(
       const requiredEvidence = matching.some((match) => match.requiresThreeEvidence) ? 3 : 2;
       const stops = mostFrequentNumber(confirmed.map((match) => match.paradas).filter((value): value is number => value !== undefined));
       const packages = mostFrequentNumber(confirmed.map((match) => match.pacotes).filter((value): value is number => value !== undefined));
-      const structuralSingleReading = confirmed.length === 1 && !best.requiresThreeEvidence && best.confidence >= 65 &&
+      const structuralSingleReading = !preference.regiao && confirmed.length === 1 && !best.requiresThreeEvidence && best.confidence >= 65 &&
         (best.row.districtText !== undefined || best.row.trailingCellText !== undefined) &&
         (stops !== undefined || packages !== undefined);
       const detection: DetectedRouteCode = {
         route: preference.bairro,
         cidade: best.row.localityText,
         bairro: preference.bairro,
+        ...(best.regiao ? { regiao: best.regiao } : {}),
         paradas: stops,
         pacotes: packages,
         code,
@@ -154,7 +180,7 @@ export function selectPreferredNeighborhoodFromOcr(
         confidence: confirmed.length ? Math.round(Math.min(...confirmed.map((match) => match.confidence))) : best.confidence,
         evidenceCount: evidence.size,
         variantCount: variants.length,
-        safeForAutomatic: evidence.size >= requiredEvidence || structuralSingleReading
+        safeForAutomatic: !regionConflicts.has(code) && (evidence.size >= requiredEvidence || structuralSingleReading)
       };
       return detection;
     });
@@ -191,7 +217,8 @@ export function selectPreferredNeighborhoodFromOcr(
       }
     } else if (!firstFailure) {
       firstFailure = { status: "unsafe", preferenceIndex: preference.index,
-        reason: codes.length > 1 ? "O bairro prioritário aparece associado a gaiolas diferentes. Envio bloqueado."
+        reason: regionConflicts.size ? "As leituras divergem sobre a região do bairro. Envio automático bloqueado."
+          : codes.length > 1 ? "O bairro prioritário aparece associado a gaiolas diferentes. Envio bloqueado."
           : incomplete ? "O bairro prioritário foi encontrado sem uma gaiola inequívoca na mesma linha. Envio bloqueado."
             : "O bairro prioritário não obteve duas leituras confiáveis da mesma gaiola. Envio bloqueado." };
     }
@@ -232,10 +259,12 @@ export function selectPreferredNeighborhoodFromOcr(
     };
   }
   return firstFailure ? { ...firstFailure, detections, selections }
-    : { status: "no-match", reason: "Nenhuma linha corresponde exatamente aos bairros configurados.", detections, selections };
+    : { status: "no-match", reason: configured.some((item) => item.regiao)
+      ? "Nenhuma linha confirmou o bairro e a região configurados na mesma rota."
+      : "Nenhuma linha corresponde exatamente aos bairros configurados.", detections, selections };
 }
 
-function matchPreference(row: Row, preference: MonitoredRoute) {
+function matchPreference(row: Row, preference: MonitoredRoute, ignoreRegion = false) {
   // Underlined route links are commonly read as H_31, H 31 or H31. Accept
   // those shapes only for a real letter followed by 1-2 digits. Never turn
   // 1/l/|/II into I or truncate a three-digit value.
@@ -279,6 +308,10 @@ function matchPreference(row: Row, preference: MonitoredRoute) {
   // It must never become the code used for a message.
   if (!lastCode && misreadFourCodeEnd === undefined) tail = tail.replace(/^\s*[A-Za-z1|]{1,2}\s*[-_\u2013\u2014:.]?\s*\d{1,3}\b/, "");
   tail = stripMetadata(tail);
+  const regiao = row.localityText !== undefined ? row.localityText.trim() : regionBeforeDistrict(tail, preference.bairro);
+  if (preference.regiao && !ignoreRegion && (!regiao || normalizeRegionIdentity(regiao) !== normalizeRegionIdentity(preference.regiao))) return undefined;
+  if (preference.regiao && !ignoreRegion && row.districtText === undefined
+    && normalizeNeighborhoodIdentity(row.trailingCellText || "") !== normalizeNeighborhoodIdentity(preference.bairro)) return undefined;
   const city = normalizeNeighborhoodIdentity(preference.cidade);
   const district = normalizeNeighborhoodIdentity(preference.bairro);
   const normalizedTail = normalizeNeighborhoodIdentity(tail);
@@ -339,7 +372,7 @@ function matchPreference(row: Row, preference: MonitoredRoute) {
     .filter(Boolean);
   if (!districts.includes(district)) return undefined;
 
-  const relevant = new Set(`${city} ${district} ${code.replace("-", " ")}`.split(/\s+/).filter(Boolean));
+  const relevant = new Set(`${city} ${district} ${preference.regiao ? normalizeNeighborhoodIdentity(regiao || preference.regiao) : ""} ${code.replace("-", " ")}`.split(/\s+/).filter(Boolean));
   const codeBackedByAt = hasExactAt && /^I-\d{1,2}$/.test(code);
   const wordConfidence = row.words.filter((word) => {
     // The thin I is commonly the lowest-confidence glyph in an otherwise
@@ -350,7 +383,7 @@ function matchPreference(row: Row, preference: MonitoredRoute) {
     return normalizeNeighborhoodIdentity(word.text).split(" ").some((token) => relevant.has(token));
   }).map((word) => word.confidence);
   const confidence = Math.round(Math.min(row.confidence, ...(wordConfidence.length ? wordConfidence : [row.confidence])));
-  return { code, confidence, ...extractQuantitiesAfterAt(row), requiresThreeEvidence };
+  return { code, confidence, ...(regiao ? { regiao } : {}), ...extractQuantitiesAfterAt(row), requiresThreeEvidence };
 }
 
 function extractQuantitiesAfterAt(row: Row | string) {
@@ -516,7 +549,8 @@ function readRows(reading: RouteOcrResult): Row[] {
     .sort((left, right) => right.left - left.left)[0] : undefined;
   const districtStart = districtHeader && precedingHeader
     ? (precedingHeader.left + precedingHeader.width + districtHeader.left) / 2 : undefined;
-  const localityHeaders = withWords.filter((word) => /^(cidade|cluster)$/.test(normalizeNeighborhoodIdentity(word.text)) && word.confidence >= 65);
+  const clusterHeaders = withWords.filter((word) => /^(cluster|regiao)$/.test(normalizeNeighborhoodIdentity(word.text)) && word.confidence >= 65);
+  const localityHeaders = clusterHeaders.length ? clusterHeaders : withWords.filter((word) => /^cidade$/.test(normalizeNeighborhoodIdentity(word.text)) && word.confidence >= 65);
   const localityHeader = localityHeaders.length === 1 ? localityHeaders[0] : undefined;
   const beforeLocalityHeader = localityHeader ? withWords.filter((word) =>
     word.left + word.width < localityHeader.left &&

@@ -37,6 +37,7 @@ export type DetectedRouteCode = {
   route: string;
   cidade?: string;
   bairro?: string;
+  regiao?: string;
   paradas?: number;
   pacotes?: number;
   code: string;

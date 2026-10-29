@@ -104,7 +104,8 @@ export function GroupMessageCard({ kind, targetMode = "manual", config, groups, 
   const activePreferences = getEnabledNeighborhoodPreferences(nextPreferences);
   const hasIncompletePreference = monitoredRoutes.some((route) => !route.bairro.trim());
   const hasIncompleteCondition = monitoredRoutes.some((route) => route.conditionMetric && !(Number(route.conditionMax) > 0));
-  const hasMessageSettings = isImageTarget ? nextPreferences.length > 0 && !hasIncompletePreference && !hasIncompleteCondition : parseCodes(codes).length > 0;
+  const hasIncompleteRegion = monitoredRoutes.some((route) => route.regiao !== undefined && !route.regiao.trim());
+  const hasMessageSettings = isImageTarget ? nextPreferences.length > 0 && !hasIncompletePreference && !hasIncompleteCondition && !hasIncompleteRegion : parseCodes(codes).length > 0;
 
   useEffect(() => {
     setGroup(isTarget ? config.grupoAlvoNome || "" : config.grupoTesteNome || "");
@@ -155,7 +156,7 @@ export function GroupMessageCard({ kind, targetMode = "manual", config, groups, 
     const nextRoutes = isImageTarget ? normalizeMonitoredRoutes(monitoredRoutes) : [];
     const nextCodes = isImageTarget ? nextRoutes.map((item) => item.bairro) : parseCodes(codes);
 
-    if (!value || !senderName.trim() || !nextCodes.length || (isImageTarget && (hasIncompletePreference || (startAfterSave && !getEnabledNeighborhoodPreferences(nextRoutes).length)))) return;
+    if (!value || !senderName.trim() || !nextCodes.length || (isImageTarget && (hasIncompletePreference || hasIncompleteCondition || hasIncompleteRegion || (startAfterSave && !getEnabledNeighborhoodPreferences(nextRoutes).length)))) return;
     setCodes(nextCodes.join("\n"));
     onSave(value, chosenGroup?.id, chosenGroup?.name, senderName.trim(), nextCodes, messageCount, intervalMs, startAfterSave, nextRoutes, isImageTarget ? "ocr" : "manual", ocrMessageLimit, ocrMaxStops, ocrMaxPackages, ocrRouteChoiceMode, ocrRouteChoiceMetric);
   }
@@ -329,6 +330,38 @@ export function GroupMessageCard({ kind, targetMode = "manual", config, groups, 
                   }}
                   placeholder="Bairro: Parque Penha"
                 />
+                {route.regiao !== undefined ? (
+                  <div className="preference-region">
+                    <label>
+                      <span>Somente nesta região</span>
+                      <input
+                        aria-label={`Região da preferência ${index + 1}`}
+                        maxLength={200}
+                        disabled={busy}
+                        value={route.regiao}
+                        placeholder="Ex.: Campos - Tamandaré"
+                        onChange={(event) => {
+                          const nextRoutes = [...monitoredRoutes];
+                          nextRoutes[index] = { ...route, regiao: event.target.value };
+                          setMonitoredRoutes(nextRoutes);
+                        }}
+                      />
+                    </label>
+                    <small>Copie o nome completo da coluna Região/Cluster. O bot precisa confirmar bairro e região na mesma linha.</small>
+                    <button className="link-button danger-link" disabled={busy} type="button" onClick={() => {
+                      const { regiao: _regiao, ...withoutRegion } = route;
+                      const nextRoutes = [...monitoredRoutes];
+                      nextRoutes[index] = withoutRegion;
+                      setMonitoredRoutes(nextRoutes);
+                    }}>Remover restrição de região</button>
+                  </div>
+                ) : (
+                  <button className="link-button add-region-button" disabled={busy} type="button" onClick={() => {
+                    const nextRoutes = [...monitoredRoutes];
+                    nextRoutes[index] = { ...route, regiao: "" };
+                    setMonitoredRoutes(nextRoutes);
+                  }}>+ Restringir região</button>
+                )}
                 {route.conditionMetric ? (
                   <div className="preference-condition">
                     <select
@@ -407,6 +440,7 @@ export function GroupMessageCard({ kind, targetMode = "manual", config, groups, 
               </button>
               <small>{activePreferences.length} de {nextPreferences.length} bairro(s) participam da análise. Use as setas para ordenar as preferências ativas.</small>
               {hasIncompletePreference ? <small role="alert">Preencha o bairro antes de salvar.</small> : null}
+              {hasIncompleteRegion ? <small role="alert">Preencha a região ou remova a restrição antes de salvar.</small> : null}
               {hasIncompleteCondition ? <small role="alert">Informe um máximo maior que zero para cada condição adicionada.</small> : null}
               {!activePreferences.length && nextPreferences.length ? <small role="alert">Todas as preferências estão pausadas. Você pode salvar, mas precisa ativar ao menos uma para iniciar o bot imagem.</small> : null}
             </div>

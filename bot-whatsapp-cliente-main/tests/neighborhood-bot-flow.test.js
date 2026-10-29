@@ -80,6 +80,39 @@ function batch(...ids) {
   return ids.map((messageId) => ({ messageId, msg: {}, groupJid: "group@g.us" }));
 }
 
+test("restrição regional persiste no caminho real e na trava final antes do automático", async (t) => {
+  const { bot } = createBot(t);
+  bot.setMessageSettings("Cliente", [], ["Centro"], [{ cidade: "", bairro: "Centro", regiao: "Campos - Tamandaré" }], "ocr");
+  mockReading(t, async () => reading([
+    "J-21 AT20261029BXC68 10 93 Campos - Centro Centro",
+    "J-29 AT20261029BX07R 27 99 Campos - Tamandaré Centro"
+  ]));
+  await bot.processRouteImageBatch(batch("region-restricted"), bot.latestRouteImageSequence);
+  assert.deepEqual(bot.pendingOcrMessages, ["Cliente J-29"]);
+  assert.equal(bot.ocrRouteSelection.options[0].regiao, "Campos - Tamandaré");
+  assert.equal(bot.findOcrConditionViolation(bot.ocrRouteSelection.options), undefined);
+  assert.match(bot.findOcrConditionViolation([{ bairro: "Centro", regiao: "Campos - Centro" }]), /região/);
+  assert.match(bot.findOcrConditionViolation([{ bairro: "Centro" }]), /região/);
+  bot.saveRoutePreset("Centro Tamandaré", bot.configStore.load().rotasMonitoradasDetalhadas);
+  assert.equal(bot.configStore.load().routePresets[0].routes[0].regiao, "Campos - Tamandaré");
+  bot.configStore.save({ rotasMonitoradasDetalhadas: [
+    { cidade: "", bairro: "Centro", regiao: "Campos - Tamandaré", conditionMetric: "stops", conditionMax: 30 },
+    { cidade: "", bairro: "Centro", regiao: "Campos - Centro", conditionMetric: "stops", conditionMax: 5 }
+  ] });
+  assert.equal(bot.findOcrConditionViolation(bot.ocrRouteSelection.options), undefined);
+  assert.match(bot.findOcrConditionViolation([{ bairro: "Centro", regiao: "Campos - Centro", paradas: 27 }]), /máximo individual de 5/);
+});
+
+test("Centro fora da região configurada não prepara nenhuma mensagem automática", async (t) => {
+  const { bot } = createBot(t);
+  bot.configStore.save({ rotasMonitoradasDetalhadas: [{ cidade: "", bairro: "Centro", regiao: "Campos - Tamandaré" }] });
+  mockReading(t, async () => reading(["J-21 AT20261029BXC68 10 93 Campos - Centro Centro"]));
+  await bot.processRouteImageBatch(batch("outside-region"), 1);
+  assert.deepEqual(bot.pendingOcrMessages, []);
+  assert.notEqual(bot.ocrRouteSelection.status, "confirmed");
+  assert.ok(bot.ocrRouteSelection.options.every((option) => option.manualOnly));
+});
+
 test("IA envia todos os bairros encontrados na ordem de preferencia, sem romaneio", async (t) => {
   const { bot, states } = createBot(t);
   // The lower preference is the first physical row. Configuration order wins.

@@ -3720,6 +3720,19 @@ body:has(.modal-backdrop) {
 
 .preference-condition input,
 .preference-condition select { min-width: 0; }
+
+.preference-region {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(168, 85, 247, 0.3);
+  border-radius: 12px;
+}
+
+.preference-region label { display: grid; gap: 6px; }
+.preference-region small { color: var(--hub-muted); }
+.preference-region input { width: 100%; min-width: 0; }
+.preference-region .danger-link { justify-self: start; }
 .add-condition-button { justify-self: start; font-size: 0.75rem; }
 .danger-link { color: #ff9fa8; font-size: 0.72rem; }
 
