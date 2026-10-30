@@ -10,6 +10,7 @@ const { PanelUserStore } = require("../dist/panelUserStore");
 const { LeaderStore } = require("../dist/leaderStore");
 const { PushNotificationStore } = require("../dist/pushNotificationStore");
 const { RequestRateLimiter } = require("../dist/httpSafety");
+const { ImageUsageStore } = require("../dist/imageUsageStore");
 
 const sessionSecret = "audit-only-session-signing-key";
 async function startServer(directory) {
@@ -40,6 +41,50 @@ async function startServer(directory) {
     }
   };
 }
+
+test("HTTP: exclusão legada chega ao painel, cancela cobrança e permanece cancelada após reiniciar", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "deleted-route-http-"));
+  const userDir = path.join(directory, "users", "client_test.com");
+  fs.mkdirSync(userDir, { recursive: true });
+  const now = new Date().toISOString();
+  fs.writeFileSync(path.join(userDir, "route_history.json"), JSON.stringify([{
+    id: "deleted-http", clientEmail: "client@test.com", groupJid: "group@g.us", groupName: "Rotas", mode: "target",
+    messages: ["Cliente J-29"], sentMessageIds: ["deleted-message"], confirmedCount: 1, totalCount: 1,
+    status: "sent", createdAt: now, updatedAt: now, validated: true, decisionStatus: "validated", validatedBy: "Líder", validatedAt: now,
+    deletedMessageIds: ["deleted-message"], reactions: []
+  }]));
+  const usage = new ImageUsageStore(path.join(directory, "image_usage.json"));
+  usage.setRoutePrice("client@test.com", 500);
+  usage.decideValidatedRoute({ routeDispatchId: "deleted-http", clientEmail: "client@test.com", messageId: "deleted-message", result: "detected" }, "Líder");
+  const entryId = usage.snapshot().entries[0].id;
+  let server = await startServer(directory);
+  t.after(async () => { await server.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const login = await server.request("/api/login", "POST", { email: "admin@test.com", password: "test-password" });
+  const token = login.data.token;
+  async function waitForCancelled() {
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const { data } = await server.request("/api/admin/monitor", "GET", undefined, token);
+      if (data.routes?.totals.deleted === 1 && data.imageUsage?.entries[0]?.cancellation) return data;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.fail("O worker não reconciliou a exclusão com o financeiro");
+  }
+  const monitor = await waitForCancelled();
+  assert.equal(monitor.routes.totals.validated, 0);
+  assert.equal(monitor.routes.totals.pending, 0);
+  assert.equal(monitor.routes.routes[0].validationBeforeDeletion.validatedBy, "Líder");
+  assert.equal(monitor.imageUsage.totals.amountCents, 0);
+  assert.equal(monitor.imageUsage.totals.unpaidRoutes, 0);
+  assert.equal((await server.request(`/api/admin/image-usage/${encodeURIComponent(entryId)}`, "PATCH", { decision: "billable" }, token)).status, 409);
+  assert.equal((await server.request("/api/admin/routes/deleted-http/validate", "PATCH", {}, token)).status, 404);
+  const clientLogin = await server.request("/api/login", "POST", { email: "client@test.com", password: "client-password" });
+  assert.equal((await server.request("/api/admin/monitor", "GET", undefined, clientLogin.data.token)).status, 403);
+  const client = await server.request("/api/snapshot", "GET", undefined, clientLogin.data.token);
+  assert.equal(client.data.routeDispatches[0].decisionStatus, "deleted");
+  assert.equal(client.data.imageUsage.amountCents, 0);
+  await server.close(); server = await startServer(directory);
+  assert.equal((await waitForCancelled()).imageUsage.entries[0].cancellation.originalAmountCents, 500);
+});
 
 test("HTTP: valida entradas, revoga sessões e preserva usuários criados no painel após reinício", async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "audit-http-"));

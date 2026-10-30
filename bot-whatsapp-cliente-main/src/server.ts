@@ -18,6 +18,7 @@ import { defaultUserColor, normalizeDispatchAdvantageMs, normalizeDispatchBeatsE
 import { SupportMessageStore } from "./supportMessageStore";
 import { ImageUsageStore } from "./imageUsageStore";
 import { validatedRouteUsagePayload } from "./validatedRouteUsage";
+import { getRouteDecisionStatus, isRouteDeleted } from "./shared/routeLifecycle";
 import { PushNotificationStore } from "./pushNotificationStore";
 import { getCurrentRelease, shouldShowCurrentReleaseToClients } from "./releaseNotes";
 import { RomaneioStore } from "./services/romaneio/romaneioStore";
@@ -104,7 +105,7 @@ function countPortableRestoreFiles(stageDir: string) {
         if (normalized.endsWith("/route_history.json") && Array.isArray(parsed)) {
           summary.routes += parsed.length;
           summary.validatedRoutes += parsed.filter((item) => item && typeof item === "object"
-            && ((item as Record<string, unknown>).decisionStatus === "validated" || (item as Record<string, unknown>).validated === true)).length;
+            && getRouteDecisionStatus(item as RouteDispatch) === "validated").length;
         }
       } catch { /* An optional JSON file can have a different format. */ }
     }
@@ -351,6 +352,13 @@ function scheduleSnapshotFanout(email: string, bot: BotProcessProxy) {
     const ready = pending.filter(([, pendingBot]) => !pendingBot.isCriticalDispatchActive());
     const delayed = pending.filter(([, pendingBot]) => pendingBot.isCriticalDispatchActive());
     for (const [pendingEmail, pendingBot] of ready) {
+      try {
+        imageUsageStore.cancelDeletedRoutes(pendingBot.getRoutes(), pendingEmail);
+      } catch (error) {
+        console.error(`Falha ao persistir cancelamento de rotas apagadas de ${pendingEmail}:`, error);
+        const retry = setTimeout(() => { if (bots.get(pendingEmail) === pendingBot) scheduleSnapshotFanout(pendingEmail, pendingBot); }, 5000);
+        retry.unref?.();
+      }
       handleCriticalBotNotifications(pendingEmail, pendingBot.getSnapshot());
       broadcastSnapshot(pendingEmail);
       logSnapshot(pendingEmail);
@@ -794,7 +802,7 @@ function getAdminRoutesSnapshot(): AdminRoutesSnapshot {
 
   const pendingReactionRoutes = allRoutes
     .filter((route) => {
-      const pending = (route.decisionStatus || (route.validated ? "validated" : "pending")) === "pending";
+      const pending = getRouteDecisionStatus(route) === "pending";
       const reacted = Boolean(
         route.reactions.length ||
         route.reactionsHistory?.length ||
@@ -815,9 +823,10 @@ function getAdminRoutesSnapshot(): AdminRoutesSnapshot {
     pendingReactionRoutes,
     totals: {
       routes: allRoutes.length,
-      validated: allRoutes.filter((route) => route.validated).length,
-      rejected: allRoutes.filter((route) => (route.decisionStatus || (route.validated ? "validated" : "pending")) === "rejected").length,
-      pending: allRoutes.filter((route) => (route.decisionStatus || (route.validated ? "validated" : "pending")) === "pending").length,
+      validated: allRoutes.filter((route) => getRouteDecisionStatus(route) === "validated").length,
+      rejected: allRoutes.filter((route) => getRouteDecisionStatus(route) === "rejected").length,
+      pending: allRoutes.filter((route) => getRouteDecisionStatus(route) === "pending").length,
+      deleted: allRoutes.filter(isRouteDeleted).length,
       reactions: allRoutes.reduce((total, route) => total + route.reactions.length, 0),
       removedReactions: allRoutes.filter((route) => route.lastReactionState?.status === "removed").length,
       clients: clients.size
@@ -838,10 +847,16 @@ async function validateAdminRoute(routeId: string, adminEmail: string) {
 }
 
 function approveRouteImageUsage(route: RouteDispatch | undefined, clientEmail: string, reviewedBy: string) {
-  if (!route) return false;
+  if (!route || isRouteDeleted(route)) return false;
+  const clientRoutes = getBotForEmail(clientEmail).getRoutes();
+  const current = clientRoutes.find((item) => item.id === route.id);
+  if (current && isRouteDeleted(current)) {
+    imageUsageStore.cancelDeletedRoutes(clientRoutes, clientEmail);
+    return false;
+  }
   const changed = imageUsageStore.decideValidatedRoute(validatedRouteUsagePayload(route, clientEmail), reviewedBy);
   if (!changed) return false;
-  const entry = imageUsageStore.snapshot().ledgerEntries?.find((item) => item.routeDispatchId === route.id);
+  const entry = imageUsageStore.snapshot().ledgerEntries?.find((item) => item.routeDispatchId === route.id && item.clientEmail === clientEmail);
   if (entry?.paymentStatus === "prepaid") {
     sendClientPush(clientEmail, {
       title: "Rota confirmada",
@@ -870,7 +885,7 @@ async function rejectAdminRoute(routeId: string, adminEmail: string, reason?: st
     const bot = getBotForEmail(email);
     const route = bot.getRoutes().find((item) => item.id === routeId);
     if (await bot.rejectRoute(routeId, adminEmail, reason)) {
-      imageUsageStore.decideForRoute(route?.ocr?.analysisId, routeId, "excluded", adminEmail);
+      imageUsageStore.decideForRoute(route?.ocr?.analysisId, routeId, "excluded", adminEmail, email);
       return true;
     }
   }
@@ -888,10 +903,11 @@ async function bulkDecideAdminRoutes(routeIds: string[], adminEmail: string, dec
   return changed;
 }
 
-function findRouteForImageUsage(entry: { id: string; routeDispatchId?: string }) {
+function findRouteForImageUsage(entry: { id: string; routeDispatchId?: string; clientEmail?: string }) {
   for (const email of getClientEmails()) {
+    if (entry.clientEmail && entry.clientEmail !== email) continue;
     const route = getBotForEmail(email).getRoutes().find((item) =>
-      item.id === entry.routeDispatchId || item.ocr?.analysisId === entry.id
+      entry.routeDispatchId ? item.id === entry.routeDispatchId : item.ocr?.analysisId === entry.id
     );
     if (route) return route;
   }
@@ -1809,6 +1825,11 @@ const server = http.createServer(async (request, response) => {
       if (body.amountCents !== undefined) validateAmount(body.amountCents);
       if (body.note !== undefined && (typeof body.note !== "string" || body.note.length > 5000)) throw new HttpError(400, "Observação inválida.");
       const decision = body.decision === "billable" || body.decision === "excluded" || body.decision === "pending" ? body.decision : undefined;
+      const originalEntry = imageUsageStore.get(id);
+      const originalRoute = originalEntry ? findRouteForImageUsage(originalEntry) : undefined;
+      if (originalEntry?.cancellation || (originalRoute && isRouteDeleted(originalRoute))) {
+        throw new HttpError(409, "Mensagem da rota apagada. O registro permanece no histórico e não pode voltar ao consumo.");
+      }
       if (!decision || !imageUsageStore.decide(id, decision, authorizedEmail, body.amountCents, body.note)) {
         sendJson(response, 404, { error: "Análise não encontrada ou decisão inválida." });
         return;

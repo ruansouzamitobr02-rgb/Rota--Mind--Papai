@@ -1199,6 +1199,7 @@ export class BotService extends EventEmitter {
         this.sock.ev.removeAllListeners("groups.update");
         this.sock.ev.removeAllListeners("group-participants.update");
         this.sock.ev.removeAllListeners("messages.upsert");
+        this.sock.ev.removeAllListeners("messages.update");
         this.sock.ev.removeAllListeners("messaging-history.set");
         this.sock.end?.(undefined);
         this.sock.ws?.close?.();
@@ -1978,8 +1979,20 @@ export class BotService extends EventEmitter {
       this.recordOutboundGroupEcho(messages || []);
       this.deferSecondarySocketTask(() => this.cacheRomaneioDocumentCandidates(messages || [], connectionId));
     });
+    this.sock.ev.on("messages.update", (updates: any[]) => {
+      this.deferSecondarySocketTask(() => {
+        if (connectionId !== this.activeConnectionId) return;
+        for (const item of updates || []) this.handleDeletedMessageUpdate(item);
+      });
+    });
+    // Baileys messages.delete represents delete-for-me / local chat cleanup.
+    // Only REVOKE protocol messages and stubs prove deletion in the group.
     this.sock.ev.on("messaging-history.set", ({ messages }: any) => {
-      this.deferSecondarySocketTask(() => this.cacheRomaneioDocumentCandidates(messages || [], connectionId));
+      this.deferSecondarySocketTask(() => {
+        if (connectionId !== this.activeConnectionId) return;
+        this.cacheRomaneioDocumentCandidates(messages || [], connectionId);
+        for (const message of messages || []) this.handleDeletedMessageNotice(message);
+      });
     });
 
   }
@@ -2396,6 +2409,12 @@ export class BotService extends EventEmitter {
 
   private async handleMessages(messages: any[], connectionId: number, eventReceivedAt = Date.now()) {
     if (connectionId !== this.activeConnectionId) return;
+    // Revocations remain relevant after sending has stopped, including in a
+    // previous target group. Keep their audit work outside the relay path.
+    this.deferSecondarySocketTask(() => {
+      if (connectionId !== this.activeConnectionId) return;
+      for (const msg of messages || []) this.handleDeletedMessageNotice(msg);
+    });
     if (!this.monitoringEnabled) {
       this.scheduleReactionProcessing(messages);
       return;
@@ -2426,7 +2445,6 @@ export class BotService extends EventEmitter {
         "";
 
       if (!texto) {
-        this.handleDeletedMessageNotice(msg);
         continue;
       }
 
@@ -2460,7 +2478,6 @@ export class BotService extends EventEmitter {
         return;
       }
 
-      this.handleDeletedMessageNotice(msg);
     }
 
     this.scheduleReactionProcessing(messages);
@@ -3384,18 +3401,18 @@ export class BotService extends EventEmitter {
             : `Reação recebida em rota enviada (${senderPhone || "remetente desconhecido"}). IDs: ${senderIdentifiers.join(" / ") || "nenhum"}`
         );
         if (action === "remove" && routeReaction.isAdmin) {
-          this.routeStore.requireClientIncident(String(reactedMessageId), {
+          const incidentRequired = this.routeStore.requireClientIncident(String(reactedMessageId), {
             kind: "leader_reaction_removed",
             message: `O líder ${routeReaction.leaderName || senderPhone || "identificado"} reagiu e removeu a reação. Explique se a rota foi válida ou não para liberar o bot.`
           });
-          this.logger.warning("Bot bloqueado para o cliente até explicar a reação removida pelo líder.");
+          if (incidentRequired) this.logger.warning("Bot bloqueado para o cliente até explicar a reação removida pelo líder.");
         }
         if (validatedByLeader && reactedRoute) {
           this.emit("route-auto-validated", {
             routeId: reactedRoute.id,
             analysisId: reactedRoute.ocr?.analysisId,
             leaderName: routeReaction.leaderName || senderPhone || "Líder identificado",
-            route: reactedRoute
+            route: this.routeStore.all().find((route) => route.id === reactedRoute.id)
           });
           void this.sendSelfNotification([
             "✅ ROTA CONFIRMADA",
@@ -3411,14 +3428,42 @@ export class BotService extends EventEmitter {
   }
 
   private handleDeletedMessageNotice(msg: any) {
-    const protocol = msg?.message?.protocolMessage;
+    const content = msg?.message?.ephemeralMessage?.message || msg?.message;
+    const protocol = content?.protocolMessage;
+    if (!protocol) {
+      // A synchronized history item can already be a tombstone. Its key is
+      // the original message author, not evidence of who revoked it.
+      this.handleDeletedMessageUpdate({ key: msg?.key, update: { messageStubType: msg?.messageStubType } });
+      return;
+    }
     const deletedMessageId = String(protocol?.key?.id || protocol?.messageKey?.id || "");
     if (!protocol || !deletedMessageId) return;
     const type = String(protocol?.type ?? protocol?.protocolMessageType ?? "").toLowerCase();
     const looksLikeDelete = type === "0" || type.includes("revoke") || type.includes("delete");
     if (!looksLikeDelete) return;
-    if (this.routeStore.recordDeletedMessage(deletedMessageId)) {
-      this.logger.warning("Mensagem enviada pelo bot foi apagada. Evento registrado para auditoria, sem bloquear o cliente.");
+    this.recordRouteMessageDeletion({ ...protocol.key, ...protocol.messageKey, id: deletedMessageId,
+      remoteJid: protocol.key?.remoteJid || protocol.messageKey?.remoteJid || msg.key?.remoteJid }, msg.key, "protocol");
+  }
+
+  private handleDeletedMessageUpdate(item: any) {
+    const stub = String(item?.update?.messageStubType ?? "").toUpperCase();
+    // Baileys turns protocol REVOKE into messages.update (REVOKE = 1).
+    // A null message by itself can also be an expiry or unrelated update.
+    if (!["1", "132", "REVOKE", "ADMIN_REVOKE"].includes(stub)) return;
+    this.recordRouteMessageDeletion(item.key, item.update?.key, "update");
+  }
+
+  private recordRouteMessageDeletion(key: any, actorKey: any, source: "protocol" | "update") {
+    const messageId = String(key?.id || "");
+    if (!messageId) return;
+    const actorJid = actorKey?.participant || (actorKey?.fromMe ? this.sock?.user?.id : undefined);
+    const actorPhone = this.normalizePhone(String(actorJid || ""));
+    const ownPhones = [this.sock?.user?.id, this.sock?.user?.lid].map((id) => this.normalizePhone(String(id || ""))).filter(Boolean);
+    // fromMe on the *deleted message* only identifies its original author.
+    // Attribute the deletion using the revocation envelope, never that key.
+    const actor = actorKey?.fromMe || (actorPhone && ownPhones.includes(actorPhone)) ? "client" : actorJid ? "other" : "unknown";
+    if (this.routeStore.recordDeletedMessage(messageId, { groupJid: key.remoteJid, actor, actorJid, source })) {
+      this.logger.warning("Mensagem da rota apagada. Validação cancelada; exclusão registrada para ajustar o consumo, sem bloquear o cliente.");
       this.emitSnapshot();
     }
   }
@@ -5154,6 +5199,7 @@ export class BotService extends EventEmitter {
       socket.ev?.removeAllListeners?.("groups.update");
       socket.ev?.removeAllListeners?.("group-participants.update");
       socket.ev?.removeAllListeners?.("messages.upsert");
+      socket.ev?.removeAllListeners?.("messages.update");
       socket.ev?.removeAllListeners?.("messaging-history.set");
       socket.end?.(undefined);
       socket.ws?.close?.();

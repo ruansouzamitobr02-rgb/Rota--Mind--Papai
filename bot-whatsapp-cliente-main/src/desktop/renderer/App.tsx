@@ -1,4 +1,5 @@
 import { PANEL_SESSION_CHANGED, revokePanelSession } from "./api";
+import { getRouteDecisionStatus, isRouteDeleted } from "../../shared/routeLifecycle";
 import { CSSProperties, FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
@@ -918,12 +919,9 @@ function getRouteTriggerLabel(route: RouteDispatch) {
   return "Automático";
 }
 
-function getRouteDecisionStatus(route: RouteDispatch) {
-  return route.decisionStatus || (route.validated ? "validated" : "pending");
-}
-
 function getRouteDecisionLabel(route: RouteDispatch) {
   const status = getRouteDecisionStatus(route);
+  if (status === "deleted") return "Mensagem apagada";
   if (status === "validated") return "Validada";
   if (status === "rejected") return "Não válida";
   return "Pendente";
@@ -1066,8 +1064,8 @@ function RouteRow({
           <div className="route-menu-popover">
             {onDetails ? <button type="button" onClick={() => { setMenuOpen(false); onDetails(); }}>Ver detalhes</button> : null}
             {onFilterClient ? <button type="button" onClick={() => { setMenuOpen(false); onFilterClient(); }}>Filtrar cliente</button> : null}
-            {!validated && onValidate ? <button type="button" onClick={() => { setMenuOpen(false); onValidate(); }}>Marcar validada</button> : null}
-            {!rejected && onReject ? <button className="danger" type="button" onClick={() => { setMenuOpen(false); onReject(); }}>Não validar</button> : null}
+            {!validated && !isRouteDeleted(route) && onValidate ? <button type="button" onClick={() => { setMenuOpen(false); onValidate(); }}>Marcar validada</button> : null}
+            {!rejected && !isRouteDeleted(route) && onReject ? <button className="danger" type="button" onClick={() => { setMenuOpen(false); onReject(); }}>Não validar</button> : null}
           </div>
         ) : null}
       </div>

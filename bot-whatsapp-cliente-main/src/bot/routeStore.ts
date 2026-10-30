@@ -1,5 +1,6 @@
 import fs from "fs";
-import { RouteClientIncident, RouteDispatch, RouteDispatchTimeline, RouteReaction, RouteReactionFinalState, RouteReactionHistoryEvent } from "../shared/types";
+import { RouteClientIncident, RouteDeletionEvent, RouteDispatch, RouteDispatchTimeline, RouteReaction, RouteReactionFinalState, RouteReactionHistoryEvent } from "../shared/types";
+import { isRouteDeleted } from "../shared/routeLifecycle";
 import { writeJsonAtomic } from "../storageJson";
 
 const MAX_ROUTES = 50_000;
@@ -58,7 +59,7 @@ export class RouteStore {
     const now = new Date().toISOString();
     this.routes =
       this.getRoutes().map((route) => {
-        if (route.id !== id) return route;
+        if (route.id !== id || isRouteDeleted(route)) return route;
         if ((route.decisionStatus || (route.validated ? "validated" : "pending")) === "validated") return route;
         changed = true;
         return {
@@ -85,7 +86,7 @@ export class RouteStore {
     const now = new Date().toISOString();
     this.routes =
       this.getRoutes().map((route) => {
-        if (!route.sentMessageIds.includes(messageId)) return route;
+        if (!route.sentMessageIds.includes(messageId) || isRouteDeleted(route)) return route;
         if ((route.decisionStatus || (route.validated ? "validated" : "pending")) === "validated") return route;
         changed = true;
         return {
@@ -112,7 +113,7 @@ export class RouteStore {
     const now = new Date().toISOString();
     this.routes =
       this.getRoutes().map((route) => {
-        if (route.id !== id) return route;
+        if (route.id !== id || isRouteDeleted(route)) return route;
         changed = true;
         return {
           ...route,
@@ -137,7 +138,7 @@ export class RouteStore {
     let changed = false;
     const now = new Date().toISOString();
     this.routes = this.getRoutes().map((route) => {
-      if (!route.sentMessageIds.includes(messageId)) return route;
+      if (!route.sentMessageIds.includes(messageId) || isRouteDeleted(route)) return route;
       if (route.clientIncident?.required && !route.clientIncident.answeredAt) return route;
       changed = true;
       return {
@@ -210,6 +211,7 @@ export class RouteStore {
   }
 
   static isClientIncidentDue(route: RouteDispatch, now = Date.now()) {
+    if (isRouteDeleted(route)) return false;
     const incident = route.clientIncident;
     if (!incident?.required || incident.answeredAt) return false;
     if (!incident.snoozedUntil) return true;
@@ -217,20 +219,28 @@ export class RouteStore {
     return !Number.isFinite(dueAt) || dueAt <= now;
   }
 
-  recordDeletedMessage(messageId: string) {
+  recordDeletedMessage(messageId: string, details: Partial<Omit<RouteDeletionEvent, "messageId">> & { groupJid?: string } = {}) {
     let changed = false;
     const now = new Date().toISOString();
     this.routes = this.getRoutes().map((route) => {
-      if (!route.sentMessageIds.includes(messageId)) return route;
+      if (!route.sentMessageIds.includes(messageId) || (details.groupJid && details.groupJid !== route.groupJid)) return route;
+      const existing = route.deletionEvents?.find((event) => event.messageId === messageId);
+      if (existing && (existing.actor !== "unknown" || !details.actor || details.actor === "unknown")) return route;
       changed = true;
       const deletedMessageIds = route.deletedMessageIds?.includes(messageId)
         ? route.deletedMessageIds
         : [messageId, ...(route.deletedMessageIds || [])];
-      return {
+      const event: RouteDeletionEvent = {
+        messageId, detectedAt: existing?.detectedAt || details.detectedAt || now,
+        actor: details.actor || "unknown", actorJid: details.actorJid, source: details.source || "protocol"
+      };
+      return this.invalidateDeletedRoute({
         ...route,
         deletedMessageIds,
+        deletedAt: route.deletedAt || event.detectedAt,
+        deletionEvents: [event, ...(route.deletionEvents || []).filter((item) => item.messageId !== messageId)],
         updatedAt: now
-      };
+      });
     });
     if (changed) this.scheduleSave();
     return changed;
@@ -339,7 +349,7 @@ export class RouteStore {
   private normalize(input: any): RouteDispatch | undefined {
     if (!input || typeof input.id !== "string") return undefined;
 
-    return {
+    const route: RouteDispatch = {
       id: input.id,
       clientEmail: typeof input.clientEmail === "string" ? input.clientEmail : "",
       groupJid: typeof input.groupJid === "string" ? input.groupJid : "",
@@ -450,7 +460,38 @@ export class RouteStore {
       deletedMessageIds: Array.isArray(input.deletedMessageIds)
         ? input.deletedMessageIds.filter((item: unknown) => typeof item === "string")
         : [],
+      deletedAt: typeof input.deletedAt === "string" ? input.deletedAt : undefined,
+      deletionEvents: Array.isArray(input.deletionEvents) ? input.deletionEvents.filter((item: any) => item && typeof item.messageId === "string").map((item: any) => ({
+        messageId: item.messageId,
+        detectedAt: typeof item.detectedAt === "string" ? item.detectedAt : input.updatedAt,
+        actor: item.actor === "client" || item.actor === "other" ? item.actor : "unknown",
+        actorJid: typeof item.actorJid === "string" ? item.actorJid : undefined,
+        source: ["protocol", "update", "legacy"].includes(item.source) ? item.source : "legacy"
+      })) : [],
+      validationBeforeDeletion: input.validationBeforeDeletion && typeof input.validationBeforeDeletion === "object" ? {
+        validatedAt: typeof input.validationBeforeDeletion.validatedAt === "string" ? input.validationBeforeDeletion.validatedAt : undefined,
+        validatedBy: typeof input.validationBeforeDeletion.validatedBy === "string" ? input.validationBeforeDeletion.validatedBy : undefined,
+        decisionSource: input.validationBeforeDeletion.decisionSource === "leader_reaction_1h" ? "leader_reaction_1h" : "admin_manual",
+        validationReactionAt: typeof input.validationBeforeDeletion.validationReactionAt === "string" ? input.validationBeforeDeletion.validationReactionAt : undefined,
+        validationLeaderName: typeof input.validationBeforeDeletion.validationLeaderName === "string" ? input.validationBeforeDeletion.validationLeaderName : undefined
+      } : undefined,
       dispatchTimeline: this.normalizeTimeline(input.dispatchTimeline)
+    };
+    if (input.decisionStatus === "deleted") route.decisionStatus = "deleted";
+    return isRouteDeleted(route) ? this.invalidateDeletedRoute(route) : route;
+  }
+
+  private invalidateDeletedRoute(route: RouteDispatch): RouteDispatch {
+    const prior = route.validationBeforeDeletion || (route.validated || route.decisionStatus === "validated" ? {
+      validatedAt: route.validatedAt, validatedBy: route.validatedBy, decisionSource: route.decisionSource,
+      validationReactionAt: route.validationReactionAt, validationLeaderName: route.validationLeaderName
+    } : undefined);
+    return {
+      ...route, validated: false, decisionStatus: "deleted", validationBeforeDeletion: prior,
+      validatedAt: undefined, validatedBy: undefined, validationReactionAt: undefined, validationLeaderName: undefined,
+      deletedAt: route.deletedAt || route.deletionEvents?.[0]?.detectedAt || route.clientIncident?.createdAt || route.updatedAt,
+      decisionReason: "Mensagem da rota apagada; validação e consumo cancelados.",
+      clientIncident: route.clientIncident ? { ...route.clientIncident, required: false } : undefined
     };
   }
 

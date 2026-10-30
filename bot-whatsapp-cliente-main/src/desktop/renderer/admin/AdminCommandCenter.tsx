@@ -1,4 +1,5 @@
 import { mergeUsageAmounts, parseMoneyInput } from "./usageDrafts";
+import { getRouteDecisionStatus, isRouteDeleted, routeDeletedAt } from "../../../shared/routeLifecycle";
 import { CSSProperties, FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
@@ -45,6 +46,7 @@ import {
   AdminUserSummary,
   AdminUsersSnapshot,
   DispatchMatchupRule,
+  ImageUsageEntry,
   LeaderContact,
   PanelUserRole,
   RouteDispatch,
@@ -92,10 +94,10 @@ type AdminCommandCenterProps = {
   onEnterClientMode: (email: string) => void | Promise<void>;
 };
 
-type AdminPage = "today" | "operations" | "dashboard" | "clients" | "validations" | "reactions" | "validated_ai" | "validated_routes" | "costs" | "usage" | "history" | "logs" | "support" | "reports" | "maintenance" | "settings";
+type AdminPage = "today" | "operations" | "dashboard" | "clients" | "validations" | "reactions" | "validated_ai" | "validated_routes" | "deleted_routes" | "costs" | "usage" | "history" | "logs" | "support" | "reports" | "maintenance" | "settings";
 type DatePreset = "today" | "7d" | "30d" | "all";
 type ReportDatePreset = AdminDatePreset | "custom";
-type DecisionFilter = "all" | "pending" | "validated" | "rejected" | "leader" | "removed";
+type DecisionFilter = "all" | "pending" | "validated" | "rejected" | "deleted" | "leader" | "removed";
 type ModeFilter = "all" | "target" | "test" | "manual" | "automatic" | "ocr" | "warmup" | "simulation";
 type LogLevelFilter = "all" | "info" | "success" | "warning" | "error";
 type CleanupTarget = "logs" | "routes" | "support" | "all";
@@ -192,10 +194,11 @@ function formatMoney(cents = 0) {
 }
 
 function routeDecision(route: RouteDispatch) {
-  return route.decisionStatus || (route.validated ? "validated" : "pending");
+  return getRouteDecisionStatus(route);
 }
 
 function routeDecisionLabel(route: RouteDispatch) {
+  if (isRouteDeleted(route)) return "Apagada · sem validação";
   if (routeDecision(route) === "pending") return "Pendente";
   if (routeDecision(route) === "rejected") return "Excluída pelo admin";
   return route.decisionSource === "leader_reaction_1h" ? "Validação automática antiga" : "Validada pelo admin";
@@ -234,6 +237,7 @@ function reactionFinalLabel(route: RouteDispatch) {
 }
 
 function incidentLabel(route: RouteDispatch) {
+  if (isRouteDeleted(route)) return "Mensagem apagada · consumo cancelado";
   if (!route.clientIncident) return "Sem incidente";
   if (route.clientIncident.answeredAt) {
     return `${route.clientIncident.valid ? "Cliente marcou válida" : "Cliente marcou não válida"} - ${route.clientIncident.reason || "sem motivo"}`;
@@ -242,6 +246,7 @@ function incidentLabel(route: RouteDispatch) {
 }
 
 function clientIncidentSummary(route: RouteDispatch) {
+  if (isRouteDeleted(route)) return "Mensagem apagada; fora das rotas válidas";
   if (!route.clientIncident) return "";
   if (!route.clientIncident.answeredAt) return "Cliente ainda não explicou";
   return `${route.clientIncident.valid ? "Cliente disse válida" : "Cliente disse não válida"}: ${route.clientIncident.reason || "sem motivo"}`;
@@ -249,6 +254,15 @@ function clientIncidentSummary(route: RouteDispatch) {
 
 function hasLeaderReaction(route: RouteDispatch) {
   return route.reactions.some((reaction) => reaction.isAdmin) || route.reactionsHistory?.some((event) => event.isAdmin);
+}
+
+function deletionActorLabel(actor?: "client" | "other" | "unknown") {
+  return actor === "client" ? "Cliente" : actor === "other" ? "Outro participante" : "Não identificado pelo WhatsApp";
+}
+
+function deletionSummary(route: RouteDispatch) {
+  const known = route.deletionEvents?.find((event) => event.actor !== "unknown");
+  return deletionActorLabel(known?.actor);
 }
 
 function hasAnyReaction(route: RouteDispatch) {
@@ -429,11 +443,13 @@ function UserEditor({
 
 function RouteSidePanel({
   route,
+  cancellation,
   onClose,
   onValidate,
   onReject
 }: {
   route: RouteDispatch;
+  cancellation?: ImageUsageEntry["cancellation"];
   onClose: () => void;
   onValidate: (id: string) => void;
   onReject: (id: string) => void;
@@ -566,10 +582,28 @@ function RouteSidePanel({
             </div>
           ) : null}
         </section>
-        <footer>
+        {isRouteDeleted(route) ? (
+          <section className="adminx-detail-section">
+            <h3>Exclusão da mensagem</h3>
+            <p>Esta rota não conta como validada nem como consumo. A confirmação anterior permanece apenas para auditoria.</p>
+            <dl className="adminx-kv">
+              <dt>Exclusão detectada</dt><dd>{formatDate(routeDeletedAt(route))}</dd>
+              <dt>Quem apagou</dt><dd>{deletionSummary(route)}</dd>
+              <dt>Validação anterior</dt><dd>{route.validationBeforeDeletion ? `${formatDate(route.validationBeforeDeletion.validatedAt)} · ${route.validationBeforeDeletion.validationLeaderName || route.validationBeforeDeletion.validatedBy || "responsável não informado"}` : "Não estava validada"}</dd>
+              {cancellation ? <><dt>Acerto financeiro</dt><dd>{cancellation.prepaidRestored ? "1 rota antecipada devolvida" : cancellation.creditGrantedCents ? `${formatMoney(cancellation.creditGrantedCents)} devolvidos como crédito para próximas rotas` : `${formatMoney(cancellation.originalAmountCents)} retirados do consumo`}</dd></> : null}
+            </dl>
+            {(route.deletionEvents?.length ? route.deletionEvents : (route.deletedMessageIds || []).map((messageId) => ({ messageId, detectedAt: routeDeletedAt(route), actor: "unknown" as const }))).map((event) => (
+              <div className="adminx-log-stack" key={event.messageId}>
+                <strong>{route.messages[route.sentMessageIds.indexOf(event.messageId)] || "Mensagem vinculada à rota"}</strong>
+                <span>{formatDate(event.detectedAt)} · {deletionActorLabel(event.actor)}{event.actorJid ? ` · ${event.actorJid}` : ""}</span>
+                <small>ID: {event.messageId}</small>
+              </div>
+            ))}
+          </section>
+        ) : <footer>
           <button className="button primary" type="button" onClick={() => onValidate(route.id)}>Validar</button>
           <button className="button danger" type="button" onClick={() => onReject(route.id)}>Rejeitar</button>
-        </footer>
+        </footer>}
       </aside>
     </div>
   );
@@ -687,7 +721,7 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
   const [logs, setLogs] = useState<AdminLogEntry[]>([]);
   const [page, setPage] = useState<AdminPage>(() => {
     const requested = new URLSearchParams(window.location.search).get("admin");
-    return ["today", "dashboard", "clients", "validations", "reactions", "validated_ai", "validated_routes", "costs", "usage", "history", "logs", "support", "reports", "maintenance", "settings"].includes(requested || "")
+    return ["today", "dashboard", "clients", "validations", "reactions", "validated_ai", "validated_routes", "deleted_routes", "costs", "usage", "history", "logs", "support", "reports", "maintenance", "settings"].includes(requested || "")
       ? requested as AdminPage
       : "dashboard";
   });
@@ -699,6 +733,7 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
   const [reportEndDate, setReportEndDate] = useState(initialReportDates.endDate);
   const [search, setSearch] = useState("");
   const [decisionFilter, setDecisionFilter] = useState<DecisionFilter>("all");
+  const [deletedBy, setDeletedBy] = useState("all");
   const [modeFilter, setModeFilter] = useState<ModeFilter>("all");
   const [logLevel, setLogLevel] = useState<LogLevelFilter>("all");
   const [busy, setBusy] = useState(false);
@@ -960,12 +995,12 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
   const visibleRoutes = useMemo(() => {
     const query = search.trim().toLowerCase();
     return routes.routes.filter((route) => {
-      const created = new Date(route.createdAt).getTime();
+      const created = new Date(page === "deleted_routes" ? routeDeletedAt(route) : route.createdAt).getTime();
       const clientOk = clientFilter === "all" || route.clientEmail === clientFilter;
       const dateOk = page === "reports" || (created >= period.start && created <= period.end);
       const decision = routeDecision(route);
       const decisionOk =
-        decisionFilter === "all" ||
+        page === "deleted_routes" || decisionFilter === "all" ||
         decisionFilter === decision ||
         (decisionFilter === "leader" && hasAnyReaction(route)) ||
         (decisionFilter === "removed" && route.lastReactionState?.status === "removed");
@@ -977,6 +1012,7 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
         (modeFilter === "automatic" && route.trigger === "automatic" && !route.ocr) ||
         (["warmup", "simulation"].includes(modeFilter) && route.trigger === modeFilter);
       const queryOk = !query || [
+        route.id,
         route.clientEmail,
         route.groupName,
         route.groupJid,
@@ -985,6 +1021,8 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
         route.ocr?.line,
         route.ocr?.route,
         ...route.messages,
+        ...(route.deletedMessageIds || []),
+        ...(route.deletionEvents || []).map((event) => event.actorJid || ""),
         ...route.reactions.flatMap((reaction) => [reaction.senderPhone, reaction.leaderName || "", reaction.emoji])
       ].some((item) => String(item || "").toLowerCase().includes(query));
       return clientOk && dateOk && decisionOk && modeOk && queryOk;
@@ -1098,6 +1136,9 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
     .sort((a, b) => a.statusRank - b.statusRank || a.client.email.localeCompare(b.client.email));
   const validatedCount = visibleRoutes.filter((route) => routeDecision(route) === "validated").length;
   const allValidatedRoutes = visibleRoutes.filter((route) => routeDecision(route) === "validated");
+  const deletedRoutes = visibleRoutes.filter((route) => isRouteDeleted(route) && (deletedBy === "all" ||
+    (deletedBy === "unknown" ? !route.deletionEvents?.some((event) => event.actor !== "unknown") : route.deletionEvents?.some((event) => event.actor === deletedBy))))
+    .sort((left, right) => Date.parse(routeDeletedAt(right)) - Date.parse(routeDeletedAt(left)));
   const validationRate = visibleRoutes.length ? Math.round((validatedCount / visibleRoutes.length) * 100) : 0;
   const ocrRoutes = visibleRoutes.filter((route) => Boolean(route.ocr));
   const sentRoutes = visibleRoutes.filter((route) => route.confirmedCount > 0);
@@ -1524,7 +1565,14 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
       envio: `${route.confirmedCount}/${route.totalCount}`,
       reacao_final: reactionFinalLabel(route),
       mensagens: route.messages.join(" | "),
-      criado_em: route.createdAt
+      criado_em: route.createdAt,
+      apagada_em: isRouteDeleted(route) ? routeDeletedAt(route) : "",
+      apagada_por: isRouteDeleted(route) ? deletionSummary(route) : "",
+      mensagens_apagadas: (route.deletedMessageIds || []).join(" | "),
+      conteudo_apagado: (route.deletedMessageIds || []).map((id) => route.messages[route.sentMessageIds.indexOf(id)] || "Mensagem vinculada à rota").join(" | "),
+      validada_antes_de_apagar: route.validationBeforeDeletion ? "sim" : "não",
+      validacao_anterior_em: route.validationBeforeDeletion?.validatedAt || "",
+      responsavel_validacao_anterior: route.validationBeforeDeletion?.validatedBy || ""
     }));
     if (format === "json") {
       downloadText("rotas-admin.json", JSON.stringify(sourceRoutes, null, 2), "application/json;charset=utf-8");
@@ -1546,6 +1594,7 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
     { id: "reactions", label: "Reações IA", Icon: MessageSquareText, badge: pendingReactedImageRoutes.length },
     { id: "validated_ai", label: "Rotas IA válidas", Icon: CheckCircle2, badge: validatedImageRoutes.length },
     { id: "validated_routes", label: "Rotas validadas", Icon: ShieldCheck, badge: validatedCount },
+    { id: "deleted_routes", label: "Rotas apagadas", Icon: Trash2, badge: visibleRoutes.filter(isRouteDeleted).length },
     { id: "costs", label: "Custos", Icon: CircleDollarSign, badge: imageUsage.totals.unpaidRoutes },
     { id: "usage", label: "Análises", Icon: BrainCircuit, badge: imageUsage.totals.pending },
     { id: "history", label: "Histórico", Icon: History },
@@ -1982,6 +2031,28 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
           </section>
         ) : null}
 
+        {page === "deleted_routes" ? (
+          <section className="adminx-page">
+            <RouteFilters decisionFilter={decisionFilter} modeFilter={modeFilter} onDecision={setDecisionFilter} onMode={setModeFilter} hideDecision />
+            <div className="adminx-page-actions">
+              <label>Quem apagou <select aria-label="Quem apagou" value={deletedBy} onChange={(event) => setDeletedBy(event.target.value)}>
+                <option value="all">Todos</option><option value="client">Cliente</option><option value="other">Outro participante</option><option value="unknown">Não identificado</option>
+              </select></label>
+              <button className="button" type="button" onClick={() => exportRoutes("csv", deletedRoutes)}><Download size={18} />Exportar apagadas</button>
+            </div>
+            <div className="adminx-metrics">
+              <MetricCard Icon={Trash2} tone="red" title="Rotas apagadas" value={deletedRoutes.length} detail="pela data de detecção da exclusão" />
+              <MetricCard Icon={ShieldCheck} tone="yellow" title="Validação cancelada" value={deletedRoutes.filter((route) => route.validationBeforeDeletion).length} detail="confirmadas antes de serem apagadas" />
+            </div>
+            <article className="adminx-panel adminx-panel-wide">
+              <div className="adminx-panel-head"><div><p>Histórico de exclusões</p><h2>Rotas apagadas</h2></div><StatusPill tone="red">{deletedRoutes.length} apagada(s)</StatusPill></div>
+              <p>Mensagens apagadas do grupo não entram nas rotas válidas nem na cobrança. Apagar só para si ou limpar a conversa não cancela a rota. Abra “Ver” para conferir a mensagem e a confirmação anterior. Quando o WhatsApp não informa quem apagou, o autor fica como não identificado.</p>
+              <RouteTable routes={deletedRoutes} selectedRoutes={[]} readOnly deletionView onSelect={() => undefined} onOpen={setRouteDetail} onValidate={() => undefined} onReject={() => undefined} />
+              {!deletedRoutes.length ? <p className="adminx-empty-text">Nenhuma rota apagada neste filtro.</p> : null}
+            </article>
+          </section>
+        ) : null}
+
         {page === "costs" ? (
           <section className="adminx-page adminx-costs-page">
             <div className="adminx-metrics">
@@ -2007,7 +2078,7 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
                       <button className="button" disabled={busy || prepaidDrafts[client.clientEmail] === ""} type="button" onClick={() => saveFinanceSettings(client.clientEmail, "credits")}>Salvar quantidade</button>
                       <button className="button danger" disabled={busy || client.prepaidRoutesRemaining === 0} type="button" onClick={() => clearPrepaidRoutes(client.clientEmail)}>Zerar saldo</button>
                     </div>
-                    <footer><span>{client.prepaidRoutesRemaining} rota(s) pré-paga(s) restante(s)</span><button className="button" disabled={busy || client.amountCents <= 0} type="button" onClick={() => markClientPaid(client.clientEmail)}>Registrar pagamento e iniciar novo período</button></footer>
+                    <footer><span>{client.prepaidRoutesRemaining} rota(s) pré-paga(s) restante(s){client.creditBalanceCents ? ` · Crédito de rotas apagadas: ${formatMoney(client.creditBalanceCents)}` : ""}</span><button className="button" disabled={busy || client.amountCents <= 0} type="button" onClick={() => markClientPaid(client.clientEmail)}>Registrar pagamento e iniciar novo período</button></footer>
                   </section>
                 ))}
                 {!pricingClients.length ? <p className="adminx-empty-text">Nenhum cliente cadastrado.</p> : null}
@@ -2016,10 +2087,10 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
             <article className="adminx-panel adminx-panel-wide">
               <div className="adminx-panel-head"><div><p>Livro financeiro</p><h2>Rotas e cobranças</h2></div><StatusPill tone="blue">{(imageUsage.ledgerEntries || imageUsage.entries).length} registro(s)</StatusPill></div>
               <div className="adminx-cost-ledger">
-                {(imageUsage.ledgerEntries || imageUsage.entries).filter((entry) => entry.decision === "billable" && (clientFilter === "all" || entry.clientEmail === clientFilter)).map((entry) => (
-                  <div key={entry.id}><span><strong>{entry.clientEmail}</strong><small>{entry.gaiola || entry.route || entry.bairro || "Rota validada"} · {formatShort(entry.reviewedAt || entry.createdAt)} · {entry.billingSource || "imagem"}</small></span><span>{entry.paymentStatus === "prepaid" ? "Pré-paga" : entry.paymentStatus === "paid" ? "Pago" : "Em aberto"}</span><strong>{formatMoney(entry.amountCents)}</strong></div>
+                {(imageUsage.ledgerEntries || imageUsage.entries).filter((entry) => (entry.decision === "billable" || entry.cancellation) && (clientFilter === "all" || entry.clientEmail === clientFilter)).map((entry) => (
+                  <div key={entry.id}><span><strong>{entry.clientEmail}</strong><small>{entry.gaiola || entry.route || entry.bairro || "Rota validada"} · {formatShort(entry.cancellation?.cancelledAt || entry.reviewedAt || entry.createdAt)} · {entry.billingSource || "imagem"}</small>{entry.cancellation ? <small>{entry.cancellation.prepaidRestored ? "Rota antecipada devolvida" : entry.cancellation.creditGrantedCents ? `Crédito devolvido: ${formatMoney(entry.cancellation.creditGrantedCents)}` : "Cobrança cancelada"}</small> : entry.creditAppliedCents ? <small>Crédito utilizado: {formatMoney(entry.creditAppliedCents)}</small> : null}</span><span>{entry.cancellation ? "Apagada · cancelada" : entry.paymentStatus === "prepaid" ? "Pré-paga" : entry.paymentStatus === "paid" ? "Pago" : "Em aberto"}</span><strong>{formatMoney(entry.cancellation ? 0 : entry.amountCents)}</strong></div>
                 ))}
-                {!(imageUsage.ledgerEntries || imageUsage.entries).some((entry) => entry.decision === "billable" && (clientFilter === "all" || entry.clientEmail === clientFilter)) ? <p className="adminx-empty-text">Nenhuma rota no livro financeiro.</p> : null}
+                {!(imageUsage.ledgerEntries || imageUsage.entries).some((entry) => (entry.decision === "billable" || entry.cancellation) && (clientFilter === "all" || entry.clientEmail === clientFilter)) ? <p className="adminx-empty-text">Nenhuma rota no livro financeiro.</p> : null}
               </div>
             </article>
           </section>
@@ -2074,7 +2145,7 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
                 </div>
                 <div className="adminx-analysis-list">
                   {visibleUsageEntries.map((entry) => {
-                    const linkedRoute = routeByAnalysisId.get(entry.id) || routes.routes.find((route) => route.id === entry.routeDispatchId);
+                    const linkedRoute = entry.routeDispatchId ? routes.routes.find((route) => route.id === entry.routeDispatchId && route.clientEmail === entry.clientEmail) : routeByAnalysisId.get(entry.id);
                     const waitUntilDispatchMs = linkedRoute && entry.analysisFinishedAt
                       ? Math.max(0, new Date(linkedRoute.createdAt).getTime() - new Date(entry.analysisFinishedAt).getTime())
                       : undefined;
@@ -2092,13 +2163,13 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
                         </div>
                       </div>
                       <StatusPill tone={entry.decision === "billable" ? "green" : entry.decision === "excluded" ? "muted" : "yellow"}>
-                        {entry.decision === "billable" ? "Aprovada" : entry.decision === "excluded" ? "Excluída" : "Pendente"}
+                        {entry.cancellation ? "Mensagem apagada" : entry.decision === "billable" ? "Aprovada" : entry.decision === "excluded" ? "Excluída" : "Pendente"}
                       </StatusPill>
-                      <label className="adminx-analysis-value"><span>R$</span><input inputMode="decimal" value={usageAmounts[entry.id] || "0,00"} onChange={(event) => editUsageAmount(entry.id, event.target.value)} /></label>
+                      <label className="adminx-analysis-value"><span>R$</span><input disabled={Boolean(entry.cancellation)} inputMode="decimal" value={usageAmounts[entry.id] || "0,00"} onChange={(event) => editUsageAmount(entry.id, event.target.value)} /></label>
                       <div className="adminx-analysis-actions">
-                        <button className="icon-button success" disabled={busy} type="button" title="Validar imagem, rota e cobrança" onClick={() => updateImageUsage(entry.id, "billable")}><CheckCircle2 size={18} /></button>
-                        <button className="icon-button danger" disabled={busy} type="button" title="Excluir imagem e rota da pendência" onClick={() => updateImageUsage(entry.id, "excluded")}><Ban size={18} /></button>
-                        {entry.decision !== "pending" ? <button className="icon-button" disabled={busy} type="button" title="Reabrir revisão" onClick={() => updateImageUsage(entry.id, "pending")}><RotateCcw size={18} /></button> : null}
+                        <button className="icon-button success" disabled={busy || Boolean(entry.cancellation)} type="button" title="Validar imagem, rota e cobrança" onClick={() => updateImageUsage(entry.id, "billable")}><CheckCircle2 size={18} /></button>
+                        <button className="icon-button danger" disabled={busy || Boolean(entry.cancellation)} type="button" title="Excluir imagem e rota da pendência" onClick={() => updateImageUsage(entry.id, "excluded")}><Ban size={18} /></button>
+                        {entry.decision !== "pending" ? <button className="icon-button" disabled={busy || Boolean(entry.cancellation)} type="button" title="Reabrir revisão" onClick={() => updateImageUsage(entry.id, "pending")}><RotateCcw size={18} /></button> : null}
                       </div>
                     </article>;
                   })}
@@ -2184,6 +2255,7 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
               <MetricCard Icon={History} tone="blue" title="Rotas" value={reportRoutes.length} detail="no período" />
               <MetricCard Icon={CheckCircle2} tone="green" title="Validadas" value={reportValidatedCount} detail={`${reportValidationRate}%`} />
               <MetricCard Icon={Ban} tone="red" title="Rejeitadas" value={reportRoutes.filter((route) => routeDecision(route) === "rejected").length} detail="julgadas" />
+              <MetricCard Icon={Trash2} tone="red" title="Apagadas" value={reportRoutes.filter(isRouteDeleted).length} detail="sem validação e sem consumo" />
               <MetricCard Icon={MessageSquareText} tone="yellow" title="Líder" value={reportRoutes.filter(hasLeaderReaction).length} detail="com reação" />
             </div>
             <article className="adminx-panel">
@@ -2432,7 +2504,7 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
         </div>
       ) : null}
 
-      {routeDetail ? <RouteSidePanel route={routeDetail} onClose={() => setRouteDetail(undefined)} onValidate={(id) => decideRoute(id, "validate")} onReject={(id) => requestReject([id])} /> : null}
+      {routeDetail ? <RouteSidePanel route={routes.routes.find((route) => route.id === routeDetail.id && route.clientEmail === routeDetail.clientEmail) || routeDetail} cancellation={(imageUsage.ledgerEntries || imageUsage.entries).find((entry) => entry.routeDispatchId === routeDetail.id && entry.clientEmail === routeDetail.clientEmail)?.cancellation} onClose={() => setRouteDetail(undefined)} onValidate={(id) => decideRoute(id, "validate")} onReject={(id) => requestReject([id])} /> : null}
       {clientDetail ? <ClientSidePanel detail={clientDetail} busy={busy} onClose={() => setClientDetail(undefined)} onAction={runClientAction} /> : null}
       {toast ? <div className="action-toast">{toast}</div> : null}
     </main>
@@ -2443,23 +2515,26 @@ function RouteFilters({
   decisionFilter,
   modeFilter,
   onDecision,
-  onMode
+  onMode,
+  hideDecision = false
 }: {
   decisionFilter: DecisionFilter;
   modeFilter: ModeFilter;
   onDecision: (value: DecisionFilter) => void;
   onMode: (value: ModeFilter) => void;
+  hideDecision?: boolean;
 }) {
   return (
     <div className="adminx-page-actions">
-      <select value={decisionFilter} onChange={(event) => onDecision(event.target.value as DecisionFilter)}>
+      {!hideDecision ? <select value={decisionFilter} onChange={(event) => onDecision(event.target.value as DecisionFilter)}>
         <option value="all">Todos status</option>
         <option value="pending">Pendentes</option>
         <option value="validated">Validadas</option>
         <option value="rejected">Rejeitadas</option>
+        <option value="deleted">Apagadas</option>
         <option value="leader">Com reação</option>
         <option value="removed">Reação removida</option>
-      </select>
+      </select> : null}
       <select value={modeFilter} onChange={(event) => onMode(event.target.value as ModeFilter)}>
         <option value="all">Todas origens</option>
         <option value="target">Todos os envios reais</option>
@@ -2479,6 +2554,7 @@ function RouteTable({
   selectedRoutes,
   compact = false,
   readOnly = false,
+  deletionView = false,
   onSelect,
   onOpen,
   onValidate,
@@ -2488,6 +2564,7 @@ function RouteTable({
   selectedRoutes: string[];
   compact?: boolean;
   readOnly?: boolean;
+  deletionView?: boolean;
   onSelect: (id: string) => void;
   onOpen: (route: RouteDispatch) => void;
   onValidate: (id: string) => void;
@@ -2508,13 +2585,14 @@ function RouteTable({
             <th>Validação</th>
             <th>Envio</th>
             <th>Data</th>
+            {deletionView ? <><th>Exclusão detectada</th><th>Quem apagou</th><th>Validação anterior</th></> : null}
             <th>Ações</th>
           </tr>
         </thead>
         <tbody>
           {routes.map((route) => (
             <tr className={`${isRealValidationRoute(route) ? "adminx-route-important" : ""} adminx-route-${routeAgeState(route)}`} key={route.id} style={colorStyle(route.clientColor)}>
-              {!readOnly ? <td data-label="Selecionar"><input type="checkbox" checked={selectedRoutes.includes(route.id)} onChange={() => onSelect(route.id)} /></td> : null}
+              {!readOnly ? <td data-label="Selecionar"><input type="checkbox" disabled={isRouteDeleted(route)} checked={selectedRoutes.includes(route.id)} onChange={() => onSelect(route.id)} /></td> : null}
               <td data-label="Cliente"><span className="adminx-client-dot" />{route.clientEmail}</td>
               <td data-label="Modo">{route.ocr ? <StatusPill tone="blue">Imagem</StatusPill> : <StatusPill tone={route.mode === "test" ? "yellow" : "green"}>{route.mode}</StatusPill>}</td>
               <td data-label="Trigger">{triggerLabel(route)}</td>
@@ -2532,17 +2610,18 @@ function RouteTable({
               <td data-label="Validação"><StatusPill tone={routeDecision(route) === "validated" ? "green" : routeDecision(route) === "rejected" ? "red" : "yellow"}>{routeDecisionLabel(route)}</StatusPill></td>
               <td data-label="Envio">{route.confirmedCount}/{route.totalCount} - {route.status}</td>
               <td data-label="Data">{formatShort(route.createdAt)}</td>
+              {deletionView ? <><td data-label="Exclusão detectada">{formatDate(routeDeletedAt(route))}</td><td data-label="Quem apagou">{deletionSummary(route)}</td><td data-label="Validação anterior">{route.validationBeforeDeletion ? `Sim · ${route.validationBeforeDeletion.validationLeaderName || route.validationBeforeDeletion.validatedBy || "confirmada"}` : "Sem validação"}</td></> : null}
               <td data-label="Ações">
                 <div className="adminx-row-actions">
                   <button className="button" type="button" onClick={() => onOpen(route)}>Ver</button>
-                  {!readOnly ? <button className="button primary" type="button" onClick={() => onValidate(route.id)}>Validar</button> : null}
-                  {!readOnly ? <button className="button danger" type="button" onClick={() => onReject(route.id)}>Rejeitar</button> : null}
+                  {!readOnly && !isRouteDeleted(route) ? <button className="button primary" type="button" onClick={() => onValidate(route.id)}>Validar</button> : null}
+                  {!readOnly && !isRouteDeleted(route) ? <button className="button danger" type="button" onClick={() => onReject(route.id)}>Rejeitar</button> : null}
                 </div>
               </td>
             </tr>
           ))}
           {!routes.length ? (
-            <tr><td colSpan={readOnly ? 10 : 11}><p className="adminx-empty-text">Nenhuma rota encontrada.</p></td></tr>
+            <tr><td colSpan={(readOnly ? 10 : 11) + (deletionView ? 3 : 0)}><p className="adminx-empty-text">Nenhuma rota encontrada.</p></td></tr>
           ) : null}
         </tbody>
       </table>
@@ -2695,6 +2774,7 @@ function ReportTable({ clients, routes }: { clients: AdminUserSummary[]; routes:
     const clientRoutes = routes.filter((route) => route.clientEmail === client.email);
     const valid = clientRoutes.filter((route) => routeDecision(route) === "validated").length;
     const rejected = clientRoutes.filter((route) => routeDecision(route) === "rejected").length;
+    const deleted = clientRoutes.filter(isRouteDeleted).length;
     const pending = clientRoutes.filter((route) => routeDecision(route) === "pending").length;
     const leader = clientRoutes.filter(hasLeaderReaction).length;
     const sent = clientRoutes.filter((route) => route.confirmedCount > 0).length;
@@ -2708,7 +2788,7 @@ function ReportTable({ clients, routes }: { clients: AdminUserSummary[]; routes:
     const projection = Math.round((clientRoutes.length / Math.max(1, currentDayOfMonth)) * daysInMonth);
     const score = Math.max(0, Math.min(100, Math.round(35 + rate * 0.3 + pickup * 0.22 + Math.min(15, activeDays * 2) + (client.monitoringEnabled ? 8 : 0) - rejected * 3 - pending * 1.2 - removed * 4 - notAcceptable * 1.5)));
     const risk = !client.monitoringEnabled ? "Bot parado" : notAcceptable >= 3 ? "WA recusando" : pending >= 5 ? "Pendência alta" : score >= 75 ? "Saudável" : "Atenção";
-    return { client, clientRoutes, valid, rejected, pending, leader, sent, activeDays, rate, pickup, projection, score, risk, topRoutes: topLabels(clientRoutes, 2) };
+    return { client, clientRoutes, valid, rejected, deleted, pending, leader, sent, activeDays, rate, pickup, projection, score, risk, topRoutes: topLabels(clientRoutes, 2) };
   }).sort((a, b) => b.score - a.score || b.valid - a.valid || b.clientRoutes.length - a.clientRoutes.length);
 
   return (
@@ -2723,6 +2803,7 @@ function ReportTable({ clients, routes }: { clients: AdminUserSummary[]; routes:
             <th>Validadas</th>
             <th>Pendentes</th>
             <th>Rejeitadas</th>
+            <th>Apagadas</th>
             <th>Reações líder</th>
             <th>Taxa</th>
             <th>Projeção</th>
@@ -2739,6 +2820,7 @@ function ReportTable({ clients, routes }: { clients: AdminUserSummary[]; routes:
               <td data-label="Validadas">{row.valid}</td>
               <td data-label="Pendentes">{row.pending}</td>
               <td data-label="Rejeitadas">{row.rejected}</td>
+              <td data-label="Apagadas">{row.deleted}</td>
               <td data-label="Reações líder">{row.leader}</td>
               <td data-label="Taxa">{row.rate}%</td>
               <td data-label="Projeção">{row.projection}</td>

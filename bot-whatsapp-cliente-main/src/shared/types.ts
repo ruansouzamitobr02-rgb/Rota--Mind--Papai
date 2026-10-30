@@ -299,6 +299,16 @@ export type ImageUsageEntry = {
   routeDispatchId?: string;
   billingSource?: "target" | "manual" | "ai" | "image";
   paymentStatus?: "unpaid" | "paid" | "prepaid";
+  creditAppliedCents?: number;
+  cancellation?: {
+    reason: "message_deleted";
+    cancelledAt: string;
+    previousDecision: ImageUsageDecision;
+    previousPaymentStatus?: "unpaid" | "paid" | "prepaid";
+    originalAmountCents: number;
+    prepaidRestored: boolean;
+    creditGrantedCents: number;
+  };
   paidAt?: string;
   note?: string;
   createdAt: string;
@@ -320,6 +330,7 @@ export type ImageUsageClientSummary = {
   manualTotalAmountCents?: number;
   routePriceCents: number;
   prepaidRoutesRemaining: number;
+  creditBalanceCents?: number;
   dueDay: number;
   paymentEveryRoutes: number;
   lastPaymentAt?: string;
@@ -614,6 +625,14 @@ export type RouteClientIncident = {
   reason?: string;
 };
 
+export type RouteDeletionEvent = {
+  messageId: string;
+  detectedAt: string;
+  actor: "client" | "other" | "unknown";
+  actorJid?: string;
+  source: "protocol" | "update" | "legacy";
+};
+
 export type RouteDispatch = {
   id: string;
   clientEmail: string;
@@ -630,7 +649,7 @@ export type RouteDispatch = {
   createdAt: string;
   updatedAt: string;
   validated: boolean;
-  decisionStatus?: "pending" | "validated" | "rejected";
+  decisionStatus?: "pending" | "validated" | "rejected" | "deleted";
   validatedAt?: string;
   validatedBy?: string;
   rejectedAt?: string;
@@ -645,6 +664,9 @@ export type RouteDispatch = {
   ocr?: RouteOcrInsight;
   clientIncident?: RouteClientIncident;
   deletedMessageIds?: string[];
+  deletedAt?: string;
+  deletionEvents?: RouteDeletionEvent[];
+  validationBeforeDeletion?: Pick<RouteDispatch, "validatedAt" | "validatedBy" | "decisionSource" | "validationReactionAt" | "validationLeaderName">;
   dispatchTimeline?: RouteDispatchTimeline;
 };
 
@@ -658,6 +680,7 @@ export type AdminRoutesSnapshot = {
     pending?: number;
     reactions: number;
     removedReactions?: number;
+    deleted?: number;
     clients: number;
   };
 };

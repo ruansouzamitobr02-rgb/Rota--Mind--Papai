@@ -1,6 +1,7 @@
 import { writeJsonAtomic } from "./storageJson";
 import fs from "fs";
-import { AdminImageUsageSnapshot, ClientImageUsageSnapshot, ImageAnalysisResult, ImageUsageDecision, ImageUsageEntry } from "./shared/types";
+import { AdminImageUsageSnapshot, ClientImageUsageSnapshot, ImageAnalysisResult, ImageUsageDecision, ImageUsageEntry, RouteDispatch } from "./shared/types";
+import { isRouteDeleted, routeDeletedAt } from "./shared/routeLifecycle";
 type StoredImageUsage = {
   entries: ImageUsageEntry[];
   defaultAmounts: Record<string, number>;
@@ -11,6 +12,8 @@ type StoredImageUsage = {
   dueDays: Record<string, number>;
   paymentEveryRoutes: Record<string, number>;
   lastPayments: Record<string, string>;
+  deletedRoutes: Record<string, string>;
+  creditBalances: Record<string, number>;
 };
 
 type RecordAnalysisInput = {
@@ -71,6 +74,7 @@ export class ImageUsageStore {
     const now = new Date().toISOString();
     this.data.entries = this.data.entries.map((entry) => {
       if (entry.id !== id) return entry;
+      if (entry.cancellation || (entry.routeDispatchId && this.isDeletedRoute(entry.clientEmail, entry.routeDispatchId))) return entry;
       changed = true;
       return {
         ...entry,
@@ -86,12 +90,13 @@ export class ImageUsageStore {
     return changed;
   }
 
-  decideForRoute(analysisId: string | undefined, routeDispatchId: string, decision: Exclude<ImageUsageDecision, "pending">, adminEmail: string) {
-    if (!analysisId) return false;
+  decideForRoute(analysisId: string | undefined, routeDispatchId: string, decision: Exclude<ImageUsageDecision, "pending">, adminEmail: string, clientEmail?: string) {
     let changed = false;
     const now = new Date().toISOString();
     this.data.entries = this.data.entries.map((entry) => {
-      if (entry.id !== analysisId) return entry;
+      if (clientEmail && entry.clientEmail !== clientEmail.trim().toLowerCase()) return entry;
+      if (entry.routeDispatchId !== routeDispatchId && (!analysisId || entry.id !== analysisId || entry.routeDispatchId)) return entry;
+      if (entry.cancellation || this.isDeletedRoute(entry.clientEmail, routeDispatchId)) return entry;
       if (entry.decision === decision && entry.routeDispatchId === routeDispatchId) return entry;
       changed = true;
       return {
@@ -110,10 +115,12 @@ export class ImageUsageStore {
 
   decideValidatedRoute(input: ValidatedRouteUsageInput, reviewedBy: string) {
     const normalizedEmail = input.clientEmail.trim().toLowerCase();
-    const routeEntry = this.data.entries.find((entry) => entry.routeDispatchId === input.routeDispatchId);
+    if (this.isDeletedRoute(normalizedEmail, input.routeDispatchId)) return false;
+    const routeEntry = this.data.entries.find((entry) => entry.clientEmail === normalizedEmail && entry.routeDispatchId === input.routeDispatchId);
+    if (routeEntry?.cancellation) return false;
     if (routeEntry?.decision === "billable") return false;
-    const analysisEntry = input.analysisId ? this.data.entries.find((entry) => entry.id === input.analysisId) : undefined;
-    const reusableAnalysis = analysisEntry && (!analysisEntry.routeDispatchId || analysisEntry.routeDispatchId === input.routeDispatchId)
+    const analysisEntry = input.analysisId ? this.data.entries.find((entry) => entry.id === input.analysisId && entry.clientEmail === normalizedEmail) : undefined;
+    const reusableAnalysis = analysisEntry && !analysisEntry.cancellation && (!analysisEntry.routeDispatchId || analysisEntry.routeDispatchId === input.routeDispatchId)
       ? analysisEntry
       : undefined;
     const legacy = routeEntry || reusableAnalysis || (!input.analysisId ? this.findLegacyAnalysisForRoute(input, normalizedEmail) : undefined);
@@ -126,6 +133,9 @@ export class ImageUsageStore {
     const prepaid = this.data.prepaidRoutes[normalizedEmail] || 0;
     const prepaidCovered = prepaid > 0;
     if (prepaidCovered) this.data.prepaidRoutes[normalizedEmail] = prepaid - 1;
+    const price = this.routePrice(normalizedEmail);
+    const creditAppliedCents = prepaidCovered ? 0 : Math.min(price, this.data.creditBalances[normalizedEmail] || 0);
+    if (creditAppliedCents) this.data.creditBalances[normalizedEmail] -= creditAppliedCents;
     this.data.entries = this.data.entries.map((candidate) => candidate.id !== entry.id ? candidate : {
       ...candidate,
       routeDispatchId: input.routeDispatchId,
@@ -136,14 +146,72 @@ export class ImageUsageStore {
       groupName: input.groupName || candidate.groupName,
       billingSource: input.billingSource || candidate.billingSource || "image",
       decision: "billable",
-      amountCents: prepaidCovered ? 0 : this.routePrice(normalizedEmail),
-      paymentStatus: prepaidCovered ? "prepaid" : "unpaid",
+      amountCents: prepaidCovered ? 0 : price - creditAppliedCents,
+      creditAppliedCents,
+      paymentStatus: prepaidCovered ? "prepaid" : creditAppliedCents >= price && price > 0 ? "paid" : "unpaid",
+      paidAt: !prepaidCovered && creditAppliedCents >= price && price > 0 ? now : undefined,
       reviewedAt: now,
       reviewedBy,
       updatedAt: now
     });
     this.save();
     return true;
+  }
+
+  isDeletedRoute(clientEmail: string, routeId: string) {
+    return Boolean(this.data.deletedRoutes[`${clientEmail.trim().toLowerCase()}:${routeId}`]);
+  }
+
+  cancelDeletedRoutes(routes: RouteDispatch[], clientEmail: string) {
+    const email = clientEmail.trim().toLowerCase();
+    const deleted = new Map(routes.filter(isRouteDeleted).map((route) => [route.id, route]));
+    if (!deleted.size) return false;
+    const liveAnalysisIds = new Set(routes.filter((route) => !isRouteDeleted(route)).map((route) => route.ocr?.analysisId).filter(Boolean));
+    const deletedByAnalysis = new Map([...deleted.values()].filter((route) => route.ocr?.analysisId && !liveAnalysisIds.has(route.ocr.analysisId)).map((route) => [route.ocr!.analysisId!, route]));
+    const needsRegistration = [...deleted.keys()].some((id) => !this.isDeletedRoute(email, id));
+    const needsCancellation = this.data.entries.some((entry) => entry.clientEmail === email && !entry.cancellation
+      && (entry.routeDispatchId ? deleted.has(entry.routeDispatchId) : deletedByAnalysis.has(entry.id)));
+    if (!needsRegistration && !needsCancellation) return false;
+    const originalData = this.data;
+    this.data = { ...this.data, deletedRoutes: { ...this.data.deletedRoutes }, prepaidRoutes: { ...this.data.prepaidRoutes }, creditBalances: { ...this.data.creditBalances } };
+    let changed = false;
+    for (const route of deleted.values()) {
+      const key = `${email}:${route.id}`;
+      if (!this.data.deletedRoutes[key]) {
+        this.data.deletedRoutes[key] = routeDeletedAt(route);
+        changed = true;
+      }
+    }
+    this.data.entries = this.data.entries.map((entry) => {
+      if (entry.clientEmail !== email || entry.cancellation) return entry;
+      const route = entry.routeDispatchId ? deleted.get(entry.routeDispatchId) : undefined;
+      // Analysis IDs can belong to several dispatched routes. Never cancel a
+      // sibling route simply because it used the same source image.
+      const unlinkedRoute = !entry.routeDispatchId ? deletedByAnalysis.get(entry.id) : undefined;
+      const cancelledRoute = route || unlinkedRoute;
+      if (!cancelledRoute) return entry;
+      changed = true;
+      const wasBillable = entry.decision === "billable" || Boolean(entry.paymentStatus);
+      const prepaidRestored = wasBillable && entry.paymentStatus === "prepaid";
+      const creditGrantedCents = wasBillable && !prepaidRestored
+        ? (entry.creditAppliedCents || 0) + (entry.paymentStatus === "paid" ? entry.amountCents : 0) : 0;
+      if (prepaidRestored) this.data.prepaidRoutes[email] = (this.data.prepaidRoutes[email] || 0) + 1;
+      if (creditGrantedCents) this.data.creditBalances[email] = (this.data.creditBalances[email] || 0) + creditGrantedCents;
+      return {
+        ...entry, routeDispatchId: cancelledRoute.id, decision: "excluded" as const,
+        cancellation: {
+          reason: "message_deleted" as const, cancelledAt: routeDeletedAt(cancelledRoute),
+          previousDecision: entry.decision, previousPaymentStatus: entry.paymentStatus,
+          originalAmountCents: entry.amountCents, prepaidRestored, creditGrantedCents
+        },
+        note: [entry.note, "Mensagem apagada: validação e consumo cancelados."].filter(Boolean).join("\n"),
+        updatedAt: new Date().toISOString()
+      };
+    });
+    if (changed) {
+      try { this.save(); } catch (error) { this.data = originalData; throw error; }
+    }
+    return changed;
   }
 
   renameClientEmail(previous: string, next: string) {
@@ -161,7 +229,13 @@ export class ImageUsageStore {
       this.data.billAllValidatedRoutes[next] = this.data.billAllValidatedRoutes[previous];
       delete this.data.billAllValidatedRoutes[previous];
     }
-    for (const map of [this.data.routePrices, this.data.prepaidRoutes, this.data.dueDays, this.data.paymentEveryRoutes, this.data.lastPayments]) {
+    for (const key of Object.keys(this.data.deletedRoutes)) {
+      if (key.startsWith(`${previous}:`)) {
+        this.data.deletedRoutes[`${next}:${key.slice(previous.length + 1)}`] = this.data.deletedRoutes[key];
+        delete this.data.deletedRoutes[key];
+      }
+    }
+    for (const map of [this.data.routePrices, this.data.prepaidRoutes, this.data.creditBalances, this.data.dueDays, this.data.paymentEveryRoutes, this.data.lastPayments]) {
       if (Object.prototype.hasOwnProperty.call(map, previous)) {
         map[next] = map[previous];
         delete map[previous];
@@ -302,6 +376,7 @@ export class ImageUsageStore {
       billAllValidatedRoutes: true,
       routePriceCents: this.routePrice(clientEmail),
       prepaidRoutesRemaining: this.data.prepaidRoutes[clientEmail] || 0,
+      creditBalanceCents: this.data.creditBalances[clientEmail] || 0,
       dueDay: this.dueDay(clientEmail),
       paymentEveryRoutes: this.paymentEveryRoutes(clientEmail),
       lastPaymentAt: this.data.lastPayments[clientEmail],
@@ -389,7 +464,9 @@ export class ImageUsageStore {
             prepaidRoutes: parsed.prepaidRoutes && typeof parsed.prepaidRoutes === "object" ? parsed.prepaidRoutes : {},
             dueDays: parsed.dueDays && typeof parsed.dueDays === "object" ? parsed.dueDays : {},
             lastPayments: parsed.lastPayments && typeof parsed.lastPayments === "object" ? parsed.lastPayments : {},
-            paymentEveryRoutes: parsed.paymentEveryRoutes && typeof parsed.paymentEveryRoutes === "object" ? parsed.paymentEveryRoutes : {}
+            paymentEveryRoutes: parsed.paymentEveryRoutes && typeof parsed.paymentEveryRoutes === "object" ? parsed.paymentEveryRoutes : {},
+            deletedRoutes: parsed.deletedRoutes && typeof parsed.deletedRoutes === "object" ? parsed.deletedRoutes : {},
+            creditBalances: parsed.creditBalances && typeof parsed.creditBalances === "object" ? parsed.creditBalances : {}
           };
         }
       } catch {
@@ -397,7 +474,7 @@ export class ImageUsageStore {
       }
     }
     if (fs.existsSync(this.filePath) || fs.existsSync(backupPath)) throw new Error("Registro de consumo inválido. Restaure um backup antes de gravar novos dados.");
-    return { entries: [], defaultAmounts: {}, monthlyTotalOverrides: {}, billAllValidatedRoutes: {}, routePrices: {}, prepaidRoutes: {}, dueDays: {}, paymentEveryRoutes: {}, lastPayments: {} };
+    return { entries: [], defaultAmounts: {}, monthlyTotalOverrides: {}, billAllValidatedRoutes: {}, routePrices: {}, prepaidRoutes: {}, dueDays: {}, paymentEveryRoutes: {}, lastPayments: {}, deletedRoutes: {}, creditBalances: {} };
   }
 
   private save() {

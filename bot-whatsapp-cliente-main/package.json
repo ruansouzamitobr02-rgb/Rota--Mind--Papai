@@ -19,7 +19,8 @@
     "desktop:build": "npm run build && electron-builder --win",
     "desktop:pack": "npm run build && electron-builder --dir",
     "test:desktop": "npm run build && node scripts/run-desktop-audit.cjs",
-    "test:web-resume": "npm run build && npm run build:main && node scripts/run-desktop-audit.cjs audit-web-resume.cjs"
+    "test:web-resume": "npm run build && npm run build:main && node scripts/run-desktop-audit.cjs audit-web-resume.cjs",
+    "test:deleted-routes": "npm run build && node scripts/run-desktop-audit.cjs audit-deleted-routes.cjs"
   },
   "build": {
     "appId": "com.botwhatsapp.desktop",
