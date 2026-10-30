@@ -7,6 +7,7 @@ import { Transform } from "stream";
 import { pipeline } from "stream/promises";
 import { verifyPassword, verifyPasswordSync } from "./passwords";
 import { HttpError, readJsonBody, readRawBody, RequestRateLimiter, validateAmount, validateEmail } from "./httpSafety";
+import { writeEventStream } from "./httpEventStream";
 import { readJsonFile, writeJsonAtomic } from "./storageJson";
 import QRCode from "qrcode";
 import qrcodeTerminal from "qrcode-terminal";
@@ -272,8 +273,7 @@ function writeStream(response: http.ServerResponse, payload: string) {
     response.end();
     return;
   }
-  // A slow/disconnected browser must not accumulate unlimited snapshots in RAM.
-  if (!response.write(payload)) response.destroy();
+  writeEventStream(response, payload);
 }
 const streamHeartbeat = setInterval(() => {
   for (const response of streamAuth.keys()) writeStream(response, ": heartbeat\n\n");
@@ -1524,6 +1524,26 @@ const server = http.createServer(async (request, response) => {
         color: panelUsers.get(authorizedEmail)?.color,
         impersonatedBy: session?.email === authorizedEmail ? session.impersonatedBy : undefined
       });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/analysis-preview") {
+      const email = String(url.searchParams.get("client") || authorizedEmail).trim().toLowerCase();
+      if (email !== authorizedEmail && getUserRole(authorizedEmail) !== "admin") {
+        sendJson(response, 403, { error: "Esta imagem pertence a outro cliente." });
+        return;
+      }
+      const id = String(url.searchParams.get("id") || "");
+      if (!id || id.length > 1000 || !panelUsers.has(email)) {
+        sendJson(response, 404, { error: "Imagem não encontrada." });
+        return;
+      }
+      const image = await getBotForEmail(email).getAnalysisPreview(id);
+      const parsed = image?.match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=\s]+)$/);
+      if (!parsed) { sendJson(response, 404, { error: "Imagem não encontrada." }); return; }
+      const buffer = Buffer.from(parsed[2], "base64");
+      response.writeHead(200, { "Content-Type": parsed[1], "Content-Length": buffer.length, "Cache-Control": "private, max-age=300", "Vary": "x-panel-token" });
+      response.end(buffer);
       return;
     }
 

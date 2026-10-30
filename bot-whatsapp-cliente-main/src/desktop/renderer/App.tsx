@@ -56,6 +56,7 @@ import {
 } from "../../shared/types";
 import { ControlButtons } from "./components/ControlButtons";
 import { GroupMessageCard } from "./components/GroupMessageCard";
+import { AnalysisImage } from "./components/AnalysisImage";
 import { LogsPanel } from "./components/LogsPanel";
 import { QrCodeBox } from "./components/QrCodeBox";
 import { SettingsPanel } from "./components/SettingsPanel";
@@ -2798,7 +2799,7 @@ function AutomaticOcrAnalysisDialog({ selection, onClose, onConfirm, busy = fals
         {selection.imagePreviewUrl ? (
           <figure className="automatic-analysis-preview">
             <figcaption>Imagem completa recebida do WhatsApp e usada na análise</figcaption>
-            <img src={selection.imagePreviewUrl} alt="Imagem completa analisada pelo bot" />
+            <AnalysisImage src={selection.imagePreviewUrl} alt="Imagem completa analisada pelo bot" />
           </figure>
         ) : null}
         {!analyzing && selection.timing ? (
@@ -3772,7 +3773,7 @@ function PanelApp() {
               </div>
               <button className="button" disabled={busy} type="button" onClick={() => setGroupEditor("image")}>Editar preferências</button>
             </div>
-            <p className="approval-message">O bot confere bairro e região, aplica os limites e depois ordena {snapshot.config.ocrRouteChoiceMode === "preference" ? "pela sua preferência" : `pelo menor número de ${snapshot.config.ocrRouteChoiceMetric === "packages" ? "pacotes" : "paradas"}`}. Pode enviar até {snapshot.config.ocrCageMessageLimit || 3} rota(s) por imagem.</p>
+            <p className="approval-message">O bot identifica os bairros e confere a região somente para Centro. Depois aplica os limites e ordena {snapshot.config.ocrRouteChoiceMode === "preference" ? "pela sua preferência" : `pelo menor número de ${snapshot.config.ocrRouteChoiceMetric === "packages" ? "pacotes" : "paradas"}`}. Pode enviar até {snapshot.config.ocrCageMessageLimit || 3} rota(s) por imagem.</p>
             <div className={`ocr-quantity-limit-notice ${snapshot.config.ocrMaxStops || snapshot.config.ocrMaxPackages ? "has-limits" : ""}`}>
               <strong>{snapshot.config.ocrMaxStops || snapshot.config.ocrMaxPackages ? "Limites gerais que podem bloquear o envio" : "Sem limites gerais de paradas ou pacotes"}</strong>
               {snapshot.config.ocrMaxStops || snapshot.config.ocrMaxPackages ? (

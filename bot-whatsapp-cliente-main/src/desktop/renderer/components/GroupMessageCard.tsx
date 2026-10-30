@@ -1,6 +1,8 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp } from "lucide-react";
+import { ArrowDown, ArrowUp, MapPin, X } from "lucide-react";
+import { createPortal } from "react-dom";
 import { BotConfig, BotGroup, MonitoredRoute } from "../../../shared/types";
+import { isCentroNeighborhood } from "../../../shared/neighborhoodRegion";
 import { uiText } from "../uiText";
 import { getEnabledNeighborhoodPreferences, getNeighborhoodPreferences, moveNeighborhoodPreference as moveRoute, neighborhoodPreferenceLabel, normalizeNeighborhoodPreferences as normalizeMonitoredRoutes } from "../neighborhoodPreferences";
 
@@ -87,6 +89,8 @@ export function GroupMessageCard({ kind, targetMode = "manual", config, groups, 
   const [manualOpen, setManualOpen] = useState(false);
   const [messageCount, setMessageCount] = useState(15);
   const [intervalMs, setIntervalMs] = useState(0);
+  const [editingRegionIndex, setEditingRegionIndex] = useState<number>();
+  const [regionDraft, setRegionDraft] = useState<string>();
   const requestedGroupsRef = useRef(false);
 
   const isTarget = kind === "target";
@@ -114,7 +118,7 @@ export function GroupMessageCard({ kind, targetMode = "manual", config, groups, 
   const activePreferences = getEnabledNeighborhoodPreferences(nextPreferences);
   const hasIncompletePreference = monitoredRoutes.some((route) => !route.bairro.trim());
   const hasIncompleteCondition = monitoredRoutes.some((route) => route.conditionMetric && !(Number(route.conditionMax) > 0));
-  const hasIncompleteRegion = monitoredRoutes.some((route) => route.regiao !== undefined && !route.regiao.trim());
+  const hasIncompleteRegion = monitoredRoutes.some((route) => isCentroNeighborhood(route.bairro) && route.regiao !== undefined && !route.regiao.trim());
   const hasMessageSettings = isImageTarget ? nextPreferences.length > 0 && !hasIncompletePreference && !hasIncompleteCondition && !hasIncompleteRegion : parseCodes(codes).length > 0;
 
   useEffect(() => {
@@ -124,6 +128,7 @@ export function GroupMessageCard({ kind, targetMode = "manual", config, groups, 
     setCodes(savedCodesKey);
     const savedPreferences = getNeighborhoodPreferences(config);
     setMonitoredRoutes(savedPreferences.length ? savedPreferences.map((route) => ({ ...route })) : [createEmptyRoute()]);
+    setEditingRegionIndex(undefined);
     setOcrMessageLimit(Math.max(1, Math.min(3, Number(config.ocrCageMessageLimit) || 3)));
     setOcrMaxStops(Math.max(0, Math.min(999, Number(config.ocrMaxStops) || 0)));
     setOcrMaxPackages(Math.max(0, Math.min(999, Number(config.ocrMaxPackages) || 0)));
@@ -191,7 +196,52 @@ export function GroupMessageCard({ kind, targetMode = "manual", config, groups, 
     .filter((item) => !query || item.name.toLowerCase().includes(query))
     .slice(0, 12);
 
+  const editingRegion = editingRegionIndex !== undefined ? monitoredRoutes[editingRegionIndex] : undefined;
+  const regionDialog = editingRegion ? (
+    <div className="modal-backdrop region-editor-backdrop" role="presentation">
+      <section className="region-editor-dialog" role="dialog" aria-modal="true" aria-labelledby="region-editor-title">
+        <div className="sheet-heading">
+          <div><p className="panel-label">Preferência {editingRegionIndex! + 1}</p><h2 id="region-editor-title">Região do Centro</h2></div>
+          <button className="icon-button" aria-label="Fechar edição de região" type="button" onClick={() => setEditingRegionIndex(undefined)}><X size={20} /></button>
+        </div>
+        <p>Esta conferência só vale para Centro. Os outros bairros seguem a leitura normal.</p>
+        <label>
+          Região que o bot pode aceitar
+          <select
+            autoFocus
+            aria-label={`Escolher região da preferência ${editingRegionIndex! + 1}`}
+            value={regionDraft === undefined ? "" : regionChoices.includes(regionDraft) ? regionDraft : "__custom__"}
+            onChange={(event) => setRegionDraft(!event.target.value ? undefined : event.target.value === "__custom__" ? "" : event.target.value)}
+          >
+            <option value="">Qualquer região (sem restrição)</option>
+            {regionChoices.map((region) => <option key={region} value={region}>{region}</option>)}
+            <option value="__custom__">Digitar outra região...</option>
+          </select>
+        </label>
+        {regionDraft !== undefined && !regionChoices.includes(regionDraft) ? (
+          <input aria-label={`Região da preferência ${editingRegionIndex! + 1}`} maxLength={200} value={regionDraft} placeholder="Ex.: Campos - Tamandaré" onChange={(event) => setRegionDraft(event.target.value)} />
+        ) : null}
+        <div className="region-editor-summary">
+          <strong>{regionDraft ? `Centro · ${regionDraft}` : "Centro de qualquer região"}</strong>
+          <span>{regionDraft ? "O Centro de outras regiões será descartado. A região precisa estar legível na mesma linha da gaiola." : "Sem restrição: qualquer Centro poderá participar da escolha."}</span>
+        </div>
+        <div className="review-actions">
+          <button className="button" type="button" onClick={() => setEditingRegionIndex(undefined)}>Cancelar</button>
+          <button className="button primary" type="button" disabled={busy || regionDraft !== undefined && !regionDraft.trim()} onClick={() => {
+            const nextRoutes = [...monitoredRoutes];
+            const { regiao: _previous, ...route } = editingRegion;
+            nextRoutes[editingRegionIndex!] = regionDraft?.trim() ? { ...route, regiao: regionDraft.trim() } : route;
+            setMonitoredRoutes(nextRoutes);
+            setEditingRegionIndex(undefined);
+          }}>Aplicar região</button>
+        </div>
+        <small>Depois, salve as preferências para enviar a alteração ao bot.</small>
+      </section>
+    </div>
+  ) : null;
+
   return (
+    <>
     <article className={`panel group-message-card ${isTarget ? "group-message-target" : "group-message-test"}`}>
       <div className="compact-heading">
         <p className="panel-label">{label.title}</p>
@@ -352,44 +402,12 @@ export function GroupMessageCard({ kind, targetMode = "manual", config, groups, 
                   }}
                   placeholder="Bairro: Parque Penha"
                 />
-                <div className="preference-region">
-                  <label>
-                    <span>Região deste bairro</span>
-                    <select
-                      aria-label={`Escolher região da preferência ${index + 1}`}
-                      disabled={busy}
-                      value={route.regiao === undefined ? "" : regionChoices.includes(route.regiao) ? route.regiao : "__custom__"}
-                      onChange={(event) => {
-                        const nextRoutes = [...monitoredRoutes];
-                        if (!event.target.value) {
-                          const { regiao: _regiao, ...withoutRegion } = route;
-                          nextRoutes[index] = withoutRegion;
-                        } else nextRoutes[index] = { ...route, regiao: event.target.value === "__custom__" ? "" : event.target.value };
-                        setMonitoredRoutes(nextRoutes);
-                      }}
-                    >
-                      <option value="">Qualquer região (sem restrição)</option>
-                      {regionChoices.map((region) => <option key={region} value={region}>{region}</option>)}
-                      <option value="__custom__">Digitar outra região...</option>
-                    </select>
-                  </label>
-                  {route.regiao !== undefined && !regionChoices.includes(route.regiao) ? (
-                    <input
-                      aria-label={`Região da preferência ${index + 1}`}
-                      maxLength={200}
-                      disabled={busy}
-                      value={route.regiao}
-                      placeholder="Ex.: Campos - Tamandaré"
-                      onChange={(event) => {
-                        const nextRoutes = [...monitoredRoutes];
-                        nextRoutes[index] = { ...route, regiao: event.target.value };
-                        setMonitoredRoutes(nextRoutes);
-                      }}
-                    />
-                  ) : null}
-                  <small>{route.regiao ? `Só aceita ${route.bairro || "este bairro"} na região ${route.regiao}.`
-                    : "Escolha uma região lida nas imagens para separar bairros com o mesmo nome."}</small>
-                </div>
+                {isCentroNeighborhood(route.bairro) ? (
+                  <button className="button region-map-button" aria-label={`Editar região da preferência ${index + 1}`} title={route.regiao || "Escolher a região do Centro"} disabled={busy} type="button" onClick={() => {
+                    setEditingRegionIndex(index);
+                    setRegionDraft(route.regiao);
+                  }}><MapPin size={17} /> Região {route.regiao ? <small>configurada</small> : null}</button>
+                ) : null}
                 {route.conditionMetric ? (
                   <div className="preference-condition">
                     <select
@@ -563,5 +581,7 @@ export function GroupMessageCard({ kind, targetMode = "manual", config, groups, 
         ) : null}
       </form>
     </article>
+    {regionDialog ? typeof document !== "undefined" ? createPortal(regionDialog, document.body) : regionDialog : null}
+    </>
   );
 }

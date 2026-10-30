@@ -1,4 +1,5 @@
 import { BotConfig, MonitoredRoute } from "../../shared/types";
+import { isCentroNeighborhood } from "../../shared/neighborhoodRegion";
 
 function preferenceKey(value: string) {
   return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("pt-BR");
@@ -11,7 +12,7 @@ export function normalizeNeighborhoodPreferences(routes: MonitoredRoute[]): Moni
     .map((route) => ({
       cidade: "",
       bairro: String(route?.bairro || "").trim().replace(/\s+/g, " "),
-      ...(typeof route?.regiao === "string" && route.regiao.trim() ? { regiao: route.regiao.trim().replace(/\s+/g, " ") } : {}),
+      ...(isCentroNeighborhood(route?.bairro) && typeof route?.regiao === "string" && route.regiao.trim() ? { regiao: route.regiao.trim().replace(/\s+/g, " ") } : {}),
       enabled: route?.enabled !== false,
       ...(route?.conditionMetric === "stops" || route?.conditionMetric === "packages"
         ? { conditionMetric: route.conditionMetric, conditionMax: Math.max(0, Math.min(999, Math.floor(Number(route.conditionMax) || 0))) }

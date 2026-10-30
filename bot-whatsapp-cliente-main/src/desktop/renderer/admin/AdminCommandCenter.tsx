@@ -34,6 +34,7 @@ import {
   Zap
 } from "lucide-react";
 import { uiText } from "../uiText";
+import { AnalysisImage } from "../components/AnalysisImage";
 import {
   AdminLogEntry,
   AdminImageUsageSnapshot,
@@ -513,7 +514,7 @@ function RouteSidePanel({
         {route.ocr ? (
           <section className="adminx-detail-section adminx-analysis-replay">
             <div className="adminx-replay-heading"><div><p className="panel-label">Replay do cliente</p><h3>Análise inteligente da imagem</h3></div><span className={`status-pill ${route.status === "sent" ? "tone-green" : "tone-yellow"}`}>{route.status === "sent" ? "Enviada" : route.status}</span></div>
-            {route.ocr.imagePreviewUrl ? <img className="adminx-ocr-preview" src={route.ocr.imagePreviewUrl} alt="Prévia da imagem processada" /> : null}
+            {route.ocr.imagePreviewUrl ? <AnalysisImage className="adminx-ocr-preview" src={route.ocr.imagePreviewUrl} alt="Prévia da imagem processada" /> : null}
             {route.ocr.analysisMessage ? <p className="adminx-replay-message">{route.ocr.analysisMessage}</p> : null}
             {route.ocr.analysisOptions?.length ? <div className="adminx-replay-routes">{route.ocr.analysisOptions.map((option) => <article key={option.id}><strong>{option.gaiola}</strong><span>{option.bairro}</span><small>{option.paradas ? `${option.paradas} paradas` : "Paradas não identificadas"}</small><small>{option.pacotes ? `${option.pacotes} pacotes` : "Pacotes não identificados"}</small></article>)}</div> : null}
             {route.ocr.analysisTiming ? <div className="adminx-replay-timing"><span><small>Baixar</small><b>{formatMs(route.ocr.analysisTiming.downloadMs)}</b></span><span><small>Analisar</small><b>{formatMs(route.ocr.analysisTiming.ocrMs)}</b></span><span><small>Comparar</small><b>{formatMs(route.ocr.analysisTiming.comparisonMs)}</b></span><span><small>Total IA</small><b>{formatMs(route.ocr.analysisTiming.totalMs)}</b></span></div> : null}

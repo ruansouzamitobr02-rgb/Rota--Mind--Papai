@@ -1,5 +1,6 @@
 import type { MonitoredRoute } from "../shared/types";
 import type { DetectedRouteCode, OcrLine, RouteOcrResult } from "./ocr";
+import { isCentroNeighborhood } from "../shared/neighborhoodRegion";
 
 export type NeighborhoodSelection = {
   status: "selected" | "no-match" | "unsafe" | "unconfigured";
@@ -105,7 +106,7 @@ export function selectPreferredNeighborhoodFromOcr(
   const configured = preferences.map((preference, index) => ({
     cidade: String(preference.cidade || "").trim(),
     bairro: canonicalConfiguredNeighborhood(preference.bairro),
-    regiao: String(preference.regiao || "").trim(),
+    regiao: isCentroNeighborhood(preference.bairro) ? String(preference.regiao || "").trim() : "",
     index,
     enabled: preference.enabled !== false,
     conditionMetric: preference.conditionMetric,

@@ -1,9 +1,11 @@
 import { BotService } from "./connection";
 import { shutdownIsolatedOcrWorker } from "./ocrIsolated";
+import { compactPanelSnapshot } from "./panelSnapshot";
 import { BotWorkerIncomingMessage, BotWorkerOutgoingMessage } from "./botProcessProtocol";
 import os from "os";
 
 const ALLOWED_METHODS = new Set([
+  "getAnalysisPreview",
   "start",
   "stop",
   "restart",
@@ -48,6 +50,7 @@ let snapshotTimer: NodeJS.Timeout | undefined;
 let shuttingDown = false;
 let reportedCritical = false;
 let callQueue = Promise.resolve();
+let workerClientEmail = "";
 let dispatchGateSequence = 0;
 const pendingDispatchGates = new Map<string, {
   resolve: (grant: { token: string; waitedMs: number }) => void;
@@ -68,6 +71,9 @@ try {
 }
 
 function send(message: BotWorkerOutgoingMessage) {
+  if ("snapshot" in message && message.snapshot) {
+    message = { ...message, snapshot: compactPanelSnapshot(message.snapshot, workerClientEmail) };
+  }
   if (process.connected) process.send?.(message);
 }
 
@@ -93,6 +99,7 @@ function scheduleSnapshot() {
 
 async function initialize(message: Extract<BotWorkerIncomingMessage, { type: "init" }>) {
   if (bot) return;
+  workerClientEmail = message.options.clientEmail || "";
   bot = new BotService({ ...message.options, deferSnapshotPayload: true });
   bot.on("snapshot", scheduleSnapshot);
   bot.on("image-analysis", (analysis) => {
@@ -127,15 +134,23 @@ async function handleCall(message: Extract<BotWorkerIncomingMessage, { type: "ca
   const method = (bot as any)[message.method];
   if (typeof method !== "function") throw new Error(`Método do bot não encontrado: ${message.method}`);
 
+  const readOnly = message.method === "getAnalysisPreview";
+  if (readOnly) {
+    const deadline = Date.now() + 5_000;
+    while (bot.isCriticalDispatchActive()) {
+      if (shuttingDown || Date.now() >= deadline) throw new Error("Envio em andamento. Aguarde para abrir a foto.");
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
   const result = await method.apply(bot, message.args || []);
-  const snapshot = bot.isCriticalDispatchActive() ? undefined : bot.getSnapshot();
+  const snapshot = readOnly || bot.isCriticalDispatchActive() ? undefined : bot.getSnapshot();
   if (snapshot && snapshotTimer) {
     clearTimeout(snapshotTimer);
     snapshotTimer = undefined;
     reportedCritical = false;
   }
   send({ type: "response", id: message.id, result, snapshot });
-  if (!snapshot) scheduleSnapshot();
+  if (!snapshot && !readOnly) scheduleSnapshot();
 }
 
 async function shutdown() {
@@ -176,6 +191,10 @@ process.on("message", (message: BotWorkerIncomingMessage) => {
     return;
   }
   if (message.type === "call") {
+    if (message.method === "getAnalysisPreview") {
+      void handleCall(message).catch((error) => send({ type: "response", id: message.id, error: error instanceof Error ? error.message : String(error) }));
+      return;
+    }
     callQueue = callQueue
       .then(() => handleCall(message))
       .catch((error) => {

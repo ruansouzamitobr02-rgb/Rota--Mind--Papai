@@ -11,6 +11,8 @@ import { BotLogger } from "./logger";
 import { combineRouteImageBatch, DetectedRouteCode, extractNeighborhoodAfterCity, findAllGaiolaCodesFromOcr, findAllPlannedAtCodesFromOcr, findNeighborhoodInOcrLine, isSafeAutomaticGaiolaDetection, reconcileGaiolaDetectionsWithRomaneio } from "./ocr";
 import { readRouteImageOcrWithoutBlockingSocket, warmupIsolatedOcrWorker } from "./ocrIsolated";
 import { canonicalConfiguredNeighborhood, findManualRouteCandidatesFromOcr, normalizeRegionIdentity, selectPreferredNeighborhoodFromOcr } from "./ocrNeighborhoodSelection";
+import { isCentroNeighborhood } from "../shared/neighborhoodRegion";
+import { createBoundedVersionLookup } from "./versionLookup";
 import { DispatchQueueStore } from "./dispatchQueue";
 import { OcrAnalysisHistoryStore } from "./ocrAnalysisHistoryStore";
 import { RouteStore } from "./routeStore";
@@ -68,6 +70,11 @@ function loadBaileys(): Promise<void> {
 
   return baileysLoadPromise;
 }
+
+const lookupWhatsAppVersion = createBoundedVersionLookup(async () => {
+  const { version } = await fetchLatestBaileysVersion();
+  return version;
+});
 
 export type BotServiceOptions = {
   authDir?: string;
@@ -408,6 +415,14 @@ export class BotService extends EventEmitter {
 
   getRoutes() {
     return this.routeStore.all();
+  }
+
+  getAnalysisPreview(id: string): string | undefined {
+    const current = this.ocrRouteSelection;
+    if (id === current.analysisId || id === current.processedAt) return current.imagePreviewUrl;
+    const previous = this.ocrAnalysisHistoryStore.all().find((item) => id === item.analysisId || id === item.processedAt);
+    if (previous?.imagePreviewUrl) return previous.imagePreviewUrl;
+    return this.getRoutes().find((route) => route.id === id || route.ocr?.analysisId === id)?.ocr?.imagePreviewUrl;
   }
 
   setDispatchGateHandlers(
@@ -2656,7 +2671,7 @@ export class BotService extends EventEmitter {
         // are tabular and do not benefit from making several OCR workers compete
         // for CPU before we know that a second interpretation is necessary.
         readings.push(await readOcrWithTimeout(imagePath, {
-          maxReadings: preferences.some((preference) => preference.regiao) ? 2 : 1, fastFirst: true, preferCageCrop: false
+          maxReadings: 1, fastFirst: true, preferCageCrop: false
         }));
       }
       if (!isCurrent()) { failCurrentAnalysis("A leitura foi interrompida porque o bot ou as preferências mudaram. Nenhuma rota foi enviada."); return; }
@@ -2667,7 +2682,10 @@ export class BotService extends EventEmitter {
         && selectedMetrics.some(({ paradas }) => paradas === undefined);
       const mixedPackages = selectedMetrics.some(({ pacotes }) => pacotes !== undefined)
         && selectedMetrics.some(({ pacotes }) => pacotes === undefined);
-      const needsReinforcedReading = decision.status !== "selected" || !decision.detection || mixedStops || mixedPackages;
+      const centroNeedsRegionConfirmation = preferences.some((preference) => isCentroNeighborhood(preference.bairro) && preference.regiao)
+        && !decision.detections.some((candidate) => isCentroNeighborhood(candidate.bairro || "") && candidate.safeForAutomatic)
+        && findManualRouteCandidatesFromOcr(ocr).some((candidate) => isCentroNeighborhood(candidate.bairro || ""));
+      const needsReinforcedReading = decision.status !== "selected" || !decision.detection || mixedStops || mixedPackages || centroNeedsRegionConfirmation;
       if (needsReinforcedReading) {
         readings = [];
         for (const imagePath of imagePaths) {
@@ -3084,7 +3102,7 @@ export class BotService extends EventEmitter {
         normalizarTexto(canonicalConfiguredNeighborhood(candidate.bairro)) ===
           normalizarTexto(canonicalConfiguredNeighborhood(option.bairro))
       );
-      const compatible = sameNeighborhood.filter((candidate) => !candidate.regiao || option.regiao
+      const compatible = sameNeighborhood.filter((candidate) => !isCentroNeighborhood(candidate.bairro) || !candidate.regiao || option.regiao
         && normalizeRegionIdentity(candidate.regiao) === normalizeRegionIdentity(option.regiao));
       if (sameNeighborhood.length && !compatible.length) {
         return `${option.bairro}: a região ${option.regiao || "não identificada"} não corresponde à região configurada. Envio automático bloqueado.`;
@@ -5208,7 +5226,7 @@ export class BotService extends EventEmitter {
   private async getWhatsAppVersion() {
     try {
       await loadBaileys();
-      const { version } = await fetchLatestBaileysVersion();
+      const version = await lookupWhatsAppVersion();
       return version;
     } catch (error) {
       this.logger.warning(

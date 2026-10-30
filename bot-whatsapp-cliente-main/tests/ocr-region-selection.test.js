@@ -119,6 +119,13 @@ test("preferência antiga sem região continua aceitando Centro de qualquer regi
   assert.equal(result.detection.code, "J-21");
 });
 
+test("outros bairros ignoram restrições regionais antigas e mantêm leitura estrutural única", () => {
+  const source = table([{ code: "F-2", stops: 20, region: "Campos - Região diferente", district: "Parque Penha" }], true);
+  const result = selectPreferredNeighborhoodFromOcr(source, [{ bairro: "Parque Penha", regiao: "Campos - Outra região" }]);
+  assert.equal(result.status, "selected");
+  assert.equal(result.detection.evidenceCount, 1);
+});
+
 test("configuração e presets preservam região após reiniciar; duplicação considera região", (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "region-config-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

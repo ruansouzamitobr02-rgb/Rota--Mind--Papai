@@ -11,6 +11,7 @@ const rendererDir = path.resolve(__dirname, "../dist/desktop/renderer");
 const streams = new Set();
 let connections = 0;
 let invalid = false;
+let imageRequests = 0;
 const snapshot = {
   status: "disconnected", groupState: "unknown", qrCode: "",
   config: {
@@ -19,7 +20,7 @@ const snapshot = {
     ocrMaxStops: 10, ocrMaxPackages: 20
   },
   groups: [{ id: "test@g.us", name: "Grupo teste" }], logs: [], readinessChecks: [], routeDispatches: [], statusEvents: [],
-  ocrAnalysisHistory: [{ status: "ready", analysisId: "region-fixture", options: [{ regiao: "Campos Tamandaré" }, { regiao: "Campos - Centro" }] }]
+  ocrAnalysisHistory: [{ status: "ready", analysisId: "region-fixture", imagePreviewUrl: "/api/analysis-preview?client=client%40resume.test&id=region-fixture", options: [{ regiao: "Campos Tamandaré" }, { regiao: "Campos - Centro" }] }]
 };
 const server = http.createServer((request, response) => {
   const pathname = new URL(request.url, "http://localhost").pathname;
@@ -27,6 +28,13 @@ const server = http.createServer((request, response) => {
   if (pathname === "/api/me") return json({ email: "client@resume.test", role: "client" });
   if (pathname === "/api/release") return json({ shouldShow: false });
   if (pathname === "/api/snapshot") return json(invalid ? {} : snapshot);
+  if (pathname === "/api/analysis-preview") {
+    imageRequests++;
+    if (request.headers["x-panel-token"] !== "resume-test-token") { response.writeHead(401); response.end(); return; }
+    response.writeHead(200, { "content-type": "image/png" });
+    response.end(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", "base64"));
+    return;
+  }
   if (pathname === "/events") {
     response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
     response.write(`data: ${JSON.stringify(invalid ? {} : snapshot)}\n\n`);
@@ -97,9 +105,12 @@ const deadline = setTimeout(() => { console.error("Web resume audit timed out");
   await window.webContents.executeJavaScript(`document.querySelectorAll('.bottom-nav button')[1].click()`);
   await waitFor(window, "document.querySelector('.ocr-quantity-limit-notice')?.textContent.includes('10 paradas')", "limites salvos não aparecem na tela principal");
   await window.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(button=>button.textContent==='Configurar bairros').click()`);
-  await waitFor(window, "Boolean(document.querySelector('.preference-region select'))", "seletor de regiões não abriu");
+  await waitFor(window, "Boolean(document.querySelector('.region-map-button'))", "botão de mapa não abriu");
+  assert.equal(await window.webContents.executeJavaScript("Boolean(document.querySelector('.region-editor-dialog'))"), false);
+  await window.webContents.executeJavaScript(`document.querySelector('.region-map-button').click()`);
+  await waitFor(window, "Boolean(document.querySelector('.region-editor-dialog select'))", "edição de região não abriu");
   const regionEditor = await window.webContents.executeJavaScript(`(() => {
-    const selector = document.querySelector('.preference-region select');
+    const selector = document.querySelector('.region-editor-dialog select');
     const choices = Array.from(selector.options).map(option=>option.value);
     Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(selector,'Campos - Centro');
     selector.dispatchEvent(new Event('change',{bubbles:true}));
@@ -108,17 +119,27 @@ const deadline = setTimeout(() => { console.error("Web resume audit timed out");
   assert.ok(regionEditor.choices.includes('Campos - Tamandaré') && regionEditor.choices.includes('Campos - Centro'));
   assert.equal(regionEditor.region, 'Campos - Centro');
   await window.webContents.executeJavaScript(`
-    const selector = document.querySelector('.preference-region select');
+    const selector = document.querySelector('.region-editor-dialog select');
     Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(selector,'Campos - Tamandaré');
     selector.dispatchEvent(new Event('change',{bubbles:true}));
-    Array.from(document.querySelectorAll('button')).find(button=>button.textContent==='Remover limites gerais').click();
+    Array.from(document.querySelectorAll('button')).find(button=>button.textContent==='Aplicar região').click();
   `);
+  await waitFor(window, "!document.querySelector('.region-editor-dialog')", "edição de região não fechou");
+  await window.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(button=>button.textContent==='Remover limites gerais').click()`);
   await waitFor(window, `document.querySelector('input[aria-label="Limite geral de paradas"]').value === ''`, "botão não removeu o limite de paradas");
   assert.deepEqual(await window.webContents.executeJavaScript(`({
     packages:document.querySelector('input[aria-label="Limite geral de pacotes"]').value,
-    region:document.querySelector('.preference-region select').value
+    region:document.querySelector('.region-map-button').title
   })`), { packages: '', region: 'Campos - Tamandaré' });
   console.log("PASS: regiões selecionadas sem digitar, limites 10/20 visíveis e remoção explícita preserva Tamandaré.");
+
+  assert.equal(imageRequests, 0, "fotos históricas não devem carregar antes de abrir a análise");
+  await window.webContents.executeJavaScript(`document.querySelector('.sheet-dialog button[title="Fechar"]').click()`);
+  await window.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(button=>button.textContent.includes('Ver histórico')).click()`);
+  await window.webContents.executeJavaScript(`document.querySelector('.ocr-analysis-history-item').click()`);
+  await waitFor(window, "document.querySelector('.automatic-analysis-preview img')?.getAttribute('src').startsWith('blob:')", "foto histórica não carregou com a sessão do painel");
+  assert.ok(imageRequests >= 1);
+  console.log("PASS: foto do histórico só carrega ao abrir a análise, com autenticação preservada.");
 
   const boundary = new BrowserWindow({ show: false, webPreferences: { nodeIntegration: true, contextIsolation: false, backgroundThrottling: false } });
   await boundary.loadURL(base + "/boundary-test");

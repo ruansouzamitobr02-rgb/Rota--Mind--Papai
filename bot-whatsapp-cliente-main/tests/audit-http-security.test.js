@@ -46,6 +46,7 @@ test("HTTP: valida entradas, revoga sessões e preserva usuários criados no pai
   let server = await startServer(directory);
   t.after(async () => { await server.close(); fs.rmSync(directory, { recursive: true, force: true }); });
   assert.equal((await server.request("/api/admin/events")).status, 401);
+  assert.equal((await server.request("/api/analysis-preview?id=photo")).status, 401);
   for (const body of ["null", "[]", "{broken"]) assert.equal((await server.request("/api/login", "POST", body)).status, 400);
   const login = await server.request("/api/login", "POST", { email: "admin@test.com", password: "test-password" });
   assert.equal(login.status, 200);
@@ -72,6 +73,7 @@ test("HTTP: valida entradas, revoga sessões e preserva usuários criados no pai
   }
   const clientLogin = await server.request("/api/login", "POST", { email: "new@test.com", password: "new-password" });
   assert.equal(clientLogin.status, 200);
+  assert.equal((await server.request("/api/analysis-preview?client=admin%40test.com&id=photo", "GET", undefined, clientLogin.data.token)).status, 403);
   assert.equal((await server.request("/api/admin/users/new%40test.com", "PATCH", { password: "changed-password" }, token)).status, 200);
   assert.equal((await server.request("/api/me", "GET", undefined, clientLogin.data.token)).status, 401);
   const beforeBlock = await server.request("/api/login", "POST", { email: "new@test.com", password: "changed-password" });

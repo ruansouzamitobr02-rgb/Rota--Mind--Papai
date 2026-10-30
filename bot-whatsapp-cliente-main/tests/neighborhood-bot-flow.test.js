@@ -113,6 +113,36 @@ test("Centro fora da região configurada não prepara nenhuma mensagem automáti
   assert.ok(bot.ocrRouteSelection.options.every((option) => option.manualOnly));
 });
 
+test("Centro ausente não aumenta leituras para os outros bairros", async (t) => {
+  const { bot } = createBot(t);
+  bot.configStore.save({ rotasMonitoradasDetalhadas: [{ bairro: "Centro", regiao: "Campos - Tamandaré" }, { bairro: "Parque Penha" }] });
+  const calls = [];
+  mockReading(t, async (_path, options) => {
+    calls.push(options.maxReadings);
+    const source = reading(["F-2 AT20261029BX07R 20 90 Campos - Parque Penha Parque Penha"]);
+    source.variants = [source.variants[0]];
+    return source;
+  });
+  await bot.processRouteImageBatch(batch("no-centro-fast"), 1);
+  assert.deepEqual(calls, [1]);
+  assert.deepEqual(bot.pendingOcrMessages, ["Cliente F-2"]);
+});
+
+test("Centro presente pede confirmação regional sem pular a preferência pela leitura rápida de outro bairro", async (t) => {
+  const { bot } = createBot(t);
+  bot.configStore.save({ rotasMonitoradasDetalhadas: [{ bairro: "Centro", regiao: "Campos - Tamandaré" }, { bairro: "Parque Penha" }] });
+  const calls = [];
+  mockReading(t, async (_path, options) => {
+    calls.push(options.maxReadings);
+    const source = reading(["J-29 AT20261029BX07R 27 99 Campos - Tamandaré Centro", "F-2 AT20261029BX08R 40 90 Campos - Parque Penha Parque Penha"]);
+    if (options.maxReadings === 1) source.variants = [source.variants[0]];
+    return source;
+  });
+  await bot.processRouteImageBatch(batch("centro-confirm"), 1);
+  assert.deepEqual(calls, [1, 5]);
+  assert.ok(bot.pendingOcrMessages.includes("Cliente J-29"));
+});
+
 test("IA envia todos os bairros encontrados na ordem de preferencia, sem romaneio", async (t) => {
   const { bot, states } = createBot(t);
   // The lower preference is the first physical row. Configuration order wins.

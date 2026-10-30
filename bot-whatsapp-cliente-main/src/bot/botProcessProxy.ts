@@ -83,6 +83,8 @@ export class BotProcessProxy extends EventEmitter {
     return this.snapshot;
   }
 
+  getAnalysisPreview(id: string): Promise<string | undefined> { return this.call("getAnalysisPreview", id); }
+
   getRoutes(): RouteDispatch[] {
     return this.snapshot.routeDispatches || [];
   }

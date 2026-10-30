@@ -178,13 +178,16 @@ test("editor pausa e reativa uma preferência sem apagar bairro ou ordem", () =>
 test("editor salva e remove a restrição regional sem transformar campo vazio em qualquer região", () => {
   const editor = renderEditor();
   editor.change(editor.find((node) => node.props["aria-label"] === "Bairro da preferência 1"), "Centro");
+  editor.click(editor.find((node) => node.props["aria-label"] === "Editar região da preferência 1"));
   editor.change(editor.find((node) => node.props["aria-label"] === "Escolher região da preferência 1"), "__custom__");
-  editor.submit();
-  assert.equal(editor.saved.length, 0, "região adicionada e vazia deve impedir o salvamento");
+  assert.equal(editor.find((node) => node.type === "button" && node.props.children === "Aplicar região").props.disabled, true);
   editor.change(editor.find((node) => node.props["aria-label"] === "Região da preferência 1"), "Campos - Tamandaré");
+  editor.click(editor.find((node) => node.type === "button" && node.props.children === "Aplicar região"));
   editor.submit();
   assert.equal(editor.saved[0][8][0].regiao, "Campos - Tamandaré");
+  editor.click(editor.find((node) => node.props["aria-label"] === "Editar região da preferência 1"));
   editor.change(editor.find((node) => node.props["aria-label"] === "Escolher região da preferência 1"), "");
+  editor.click(editor.find((node) => node.type === "button" && node.props.children === "Aplicar região"));
   editor.submit();
   assert.equal(editor.saved[1][8][0].regiao, undefined);
 });
@@ -192,10 +195,12 @@ test("editor salva e remove a restrição regional sem transformar campo vazio e
 test("região lida na imagem pode ser escolhida sem digitar", () => {
   const editor = renderEditor({ detectedRegions: ["Campos Tamandaré", "Campos - Centro"] });
   editor.change(editor.find((node) => node.props["aria-label"] === "Bairro da preferência 1"), "Centro");
+  editor.click(editor.find((node) => node.props["aria-label"] === "Editar região da preferência 1"));
   const selector = editor.find((node) => node.props["aria-label"] === "Escolher região da preferência 1");
   assert.ok(editor.all((node) => node.type === "option" && node.props.value === "Campos Tamandaré").length);
   editor.change(selector, "Campos Tamandaré");
   assert.equal(editor.all((node) => node.props["aria-label"] === "Região da preferência 1").length, 0);
+  editor.click(editor.find((node) => node.type === "button" && node.props.children === "Aplicar região"));
   editor.submit();
   assert.equal(editor.saved[0][8][0].regiao, "Campos Tamandaré");
 });
@@ -225,4 +230,17 @@ test("editor do target mantém códigos manuais e não aplica preferências da I
   assert.deepEqual(JSON.parse(JSON.stringify(editor.saved[0][4])), ["P-12", "F-14"]);
   assert.deepEqual(JSON.parse(JSON.stringify(editor.saved[0][8])), []);
   assert.equal(editor.saved[0][9], "manual");
+});
+
+test("botão de mapa só aparece para Centro e cancelar não altera a região salva", () => {
+  const editor = renderEditor();
+  assert.equal(editor.all((node) => /Editar região da preferência/.test(node.props["aria-label"] || "")).length, 0);
+  editor.change(editor.find((node) => node.props["aria-label"] === "Bairro da preferência 1"), "Centro");
+  assert.equal(editor.all((node) => /Escolher região da preferência/.test(node.props["aria-label"] || "")).length, 0);
+  editor.click(editor.find((node) => node.props["aria-label"] === "Editar região da preferência 1"));
+  editor.change(editor.find((node) => node.props["aria-label"] === "Escolher região da preferência 1"), "__custom__");
+  editor.change(editor.find((node) => node.props["aria-label"] === "Região da preferência 1"), "Campos - Centro");
+  editor.click(editor.find((node) => node.type === "button" && node.props.children === "Cancelar"));
+  editor.submit();
+  assert.equal(editor.saved[0][8][0].regiao, undefined);
 });
