@@ -80,6 +80,60 @@ function batch(...ids) {
   return ids.map((messageId) => ({ messageId, msg: {}, groupJid: "group@g.us" }));
 }
 
+function lowConfidenceReading() {
+  const source = reading(["A-1 AT2026110700001 27 99 Campos Centro"]);
+  source.variants = [source.variants[0]];
+  for (const result of [source, ...source.variants]) for (const item of result.lines) {
+    item.confidence = 20;
+    for (const word of item.words) word.confidence = 20;
+  }
+  return source;
+}
+
+test("nota baixa em uma linha completa chega ao disparo automático sem leitura extra", async (t) => {
+  const { bot } = createBot(t);
+  bot.setMessageSettings("Cliente", [], ["Centro"], [{ cidade: "", bairro: "Centro" }], "ocr");
+  const calls = [];
+  mockReading(t, async (_imagePath, options) => { calls.push(options.maxReadings); return lowConfidenceReading(); });
+  delete bot.dispatchPreparedOcrIfGroupOpen;
+  bot.groupState = "open";
+  const sent = [];
+  // Exercise analysis, the final preference gate and the open-group dispatcher.
+  // Replace only the WhatsApp transport with a recorded acknowledgement.
+  bot.enviarMensagensRapidas = (_cycleId, trigger) => {
+    assert.equal(trigger, "automatic");
+    sent.push(...bot.pendingOcrMessages);
+    bot.routeStore.create({
+      id: "low-confidence-send", clientEmail: "client@test.com", groupJid: "group@g.us", groupName: "Rotas",
+      mode: "target", trigger, messages: [...bot.pendingOcrMessages], sentMessageIds: ["sent-low-confidence"],
+      confirmedCount: 1, totalCount: 1, status: "sent", ocr: bot.lastOcrInsight
+    });
+    bot.activeSendCycle = Promise.resolve();
+    return true;
+  };
+  await bot.processRouteImageBatch(batch("low-confidence-image"), bot.latestRouteImageSequence);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, [1]);
+  assert.deepEqual(sent, ["Cliente A-1"]);
+  assert.equal(bot.ocrRouteSelection.dispatchState, "sent");
+  assert.equal(bot.ocrRouteSelection.options[0].score, 20);
+  assert.equal(bot.ocrRouteSelection.options[0].manualOnly, undefined);
+  assert.equal(bot.routeStore.all()[0].confirmedCount, 1);
+});
+
+test("reajuste de confiança não ultrapassa o máximo de paradas configurado", async (t) => {
+  const { bot } = createBot(t);
+  bot.setMessageSettings("Cliente", [], ["Centro"], [{ cidade: "", bairro: "Centro" }], "ocr");
+  bot.configStore.save({ ocrMaxStops: 10 });
+  mockReading(t, async () => lowConfidenceReading());
+  let sends = 0;
+  bot.dispatchPreparedOcrIfGroupOpen = async () => { sends++; return true; };
+  await bot.processRouteImageBatch(batch("low-confidence-over-limit"), bot.latestRouteImageSequence);
+  assert.equal(sends, 0);
+  assert.deepEqual(bot.pendingOcrMessages, []);
+  assert.match(bot.ocrRouteSelection.message, /limite geral de 10/);
+});
+
 test("restrição regional persiste no caminho real e na trava final antes do automático", async (t) => {
   const { bot } = createBot(t);
   bot.setMessageSettings("Cliente", [], ["Centro"], [{ cidade: "", bairro: "Centro", regiao: "Campos - Tamandaré" }], "ocr");

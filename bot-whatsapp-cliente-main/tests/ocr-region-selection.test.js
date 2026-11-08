@@ -100,12 +100,28 @@ test("divergência de região na mesma gaiola bloqueia mesmo com duas leituras c
   assert.match(result.reason, /região/);
 });
 
-test("condição regional exige duas leituras confiáveis da região", () => {
+test("região do Centro exige leituras concordantes sem nota mínima de confiança", () => {
   assert.equal(selectPreferredNeighborhoodFromOcr(table([desired], true), [preference]).status, "unsafe");
   const first = table([desired], true);
   const weak = structuredClone(first);
   weak.lines.find((item) => item.text === desired.region).words.find((word) => word.text === "Tamandaré").confidence = 35;
-  assert.equal(selectPreferredNeighborhoodFromOcr({ ...first, variants: [first, weak] }, [preference]).status, "unsafe");
+  const result = selectPreferredNeighborhoodFromOcr({ ...first, variants: [first, weak] }, [preference]);
+  assert.equal(result.status, "selected");
+  assert.equal(result.detection.code, "J-29");
+  assert.equal(result.detection.regiao, "Campos - Tamandaré");
+  assert.equal(result.detection.confidence, 35);
+});
+
+test("região incorreta bloqueia o mesmo código mesmo quando sua nota é baixa", () => {
+  const first = table([desired], true);
+  const otherRegion = table([{ ...desired, region: "Campos - Centro" }], true);
+  for (const item of otherRegion.lines) {
+    item.confidence = 10;
+    for (const word of item.words) word.confidence = 10;
+  }
+  const result = selectPreferredNeighborhoodFromOcr({ ...first, variants: [first, structuredClone(first), otherRegion] }, [preference]);
+  assert.equal(result.status, "unsafe");
+  assert.match(result.reason, /região/);
 });
 
 test("acento e prefixo completo de Campos são normalizados sem confundir regiões", () => {

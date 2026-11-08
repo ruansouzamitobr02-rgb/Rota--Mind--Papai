@@ -2773,7 +2773,7 @@ export class BotService extends EventEmitter {
           regiao: detection.regiao,
           distanciaKm: 0, pacotes: detection.pacotes || 0, paradas: detection.paradas || 0,
           passedFilters: true,
-          reasons: [`Preferência ${preferenceIndex + 1}: ${preference.bairro}`, "Bairro e gaiola conferidos na mesma linha em leituras concordantes.", detection.paradas ? `${detection.paradas} paradas identificadas após o AT.` : "", detection.pacotes ? `${detection.pacotes} pacotes identificados.` : ""].filter(Boolean),
+          reasons: [`Preferência ${preferenceIndex + 1}: ${preference.bairro}`, detection.evidenceCount === 1 ? "Bairro e gaiola identificados juntos na linha da tabela." : "Bairro e gaiola conferidos na mesma linha em leituras concordantes.", detection.paradas ? `${detection.paradas} paradas identificadas após o AT.` : "", detection.pacotes ? `${detection.pacotes} pacotes identificados.` : ""].filter(Boolean),
           score: detection.confidence,
           observation: `${detection.regiao ? `Região: ${detection.regiao}. ` : ""}Selecionado diretamente da imagem, sem romaneio.`
         };

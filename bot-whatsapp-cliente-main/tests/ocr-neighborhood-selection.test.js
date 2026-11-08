@@ -326,11 +326,87 @@ test("reconstrói linhas quando o OCR agrupa toda uma coluna em um bloco", () =>
   assert.equal(result.detection.code, "F-14");
 });
 
-test("exige confiança dos nomes e código, não apenas média alta da linha", () => {
+test("palavra com confiança baixa não veta duas leituras concordantes do bairro", () => {
   const row = line("F-14 Campos dos Goytacazes Parque Rodoviário");
   row.words.at(-1).confidence = 20;
-  assert.equal(selectPreferredNeighborhoodFromOcr(consensus([row]), preferred).status, "unsafe");
+  const selected = selectPreferredNeighborhoodFromOcr(consensus([row]), preferred);
+  assert.equal(selected.status, "selected");
+  assert.equal(selected.detection.confidence, 20);
   assert.equal(selectPreferredNeighborhoodFromOcr(reading([row]), preferred).status, "unsafe");
+});
+
+function lowConfidenceTable(confidence, code = "F-14", stops = 27, at = "AT2026110700001") {
+  return reading([
+    line("ROTA", 10, 20, confidence), line("AT", 10, 180, confidence),
+    line("PARADAS", 10, 430, confidence), line("PACOTES", 10, 520, confidence),
+    line("CLUSTER", 10, 620, confidence), line("BAIRRO", 10, 1050, confidence),
+    line(code, 60, 20, confidence), line(at, 60, 180, confidence),
+    line(String(stops), 60, 430, confidence), line("99", 60, 520, confidence),
+    line("Campos - Parque Rodoviário", 60, 620, confidence), line("Parque Rodoviário", 60, 1050, confidence)
+  ]);
+}
+
+test("linha completa da tabela libera com uma leitura mesmo abaixo de 65 por cento", () => {
+  for (const confidence of [64, 35, 20, 0]) {
+    const result = selectPreferredNeighborhoodFromOcr(lowConfidenceTable(confidence), preferred);
+    assert.equal(result.status, "selected", String(confidence));
+    assert.equal(result.detection.code, "F-14");
+    assert.equal(result.detection.evidenceCount, 1);
+    assert.equal(result.detection.confidence, confidence);
+    assert.equal(result.detection.paradas, 27);
+    assert.equal(result.detection.pacotes, 99);
+  }
+});
+
+test("sem cabeçalho, linha completa com confiança baixa continua automática", () => {
+  const source = lowConfidenceTable(20);
+  source.lines = source.lines.filter((item) => item.top > 10);
+  source.text = source.lines.map((item) => item.text).join("\n");
+  const result = selectPreferredNeighborhoodFromOcr(source, preferred);
+  assert.equal(result.status, "selected");
+  assert.equal(result.detection.code, "F-14");
+});
+
+test("gaiola com menos paradas não perde para outra só por ter confiança menor", () => {
+  const source = lowConfidenceTable(94, "F-5", 59, "AT2026110700001");
+  const low = lowConfidenceTable(10, "F-9", 15, "AT2026110700002");
+  for (const item of low.lines.filter((row) => row.top > 10)) {
+    item.top += 40;
+    for (const word of item.words) word.top += 40;
+    source.lines.push(item);
+  }
+  source.text = source.lines.map((item) => item.text).join("\n");
+  const result = selectPreferredNeighborhoodFromOcr(source, preferred);
+  assert.equal(result.status, "selected");
+  assert.equal(result.detection.code, "F-9");
+  assert.equal(result.detection.paradas, 15);
+  assert.equal(result.detection.confidence, 10);
+});
+
+test("reajuste de confiança preserva limites gerais, individuais e preferências pausadas", () => {
+  const source = lowConfidenceTable(15);
+  assert.equal(selectPreferredNeighborhoodFromOcr(source, preferred, 10).status, "unsafe");
+  assert.equal(selectPreferredNeighborhoodFromOcr(source, preferred, 0, 20).status, "unsafe");
+  assert.equal(selectPreferredNeighborhoodFromOcr(source, [{ ...preferred[0], conditionMetric: "stops", conditionMax: 10 }]).status, "unsafe");
+  assert.equal(selectPreferredNeighborhoodFromOcr(source, [{ ...preferred[0], enabled: false }]).status, "unconfigured");
+});
+
+test("confiança baixa não mistura gaiola de outra linha nem bairros parecidos", () => {
+  const source = lowConfidenceTable(10);
+  for (const item of source.lines) if (item.text === "F-14") {
+    item.top += 40;
+    for (const word of item.words) word.top += 40;
+  }
+  assert.notEqual(selectPreferredNeighborhoodFromOcr(source, preferred).status, "selected");
+  assert.equal(selectPreferredNeighborhoodFromOcr(lowConfidenceTable(10), [{ bairro: "Rodoviário" }]).status, "no-match");
+});
+
+test("duas leituras de baixa confiança que discordam sobre a gaiola do mesmo AT não disparam", () => {
+  const first = lowConfidenceTable(20, "F-14");
+  const second = lowConfidenceTable(15, "F-1");
+  const result = selectPreferredNeighborhoodFromOcr({ ...first, variants: [first, second] }, preferred);
+  assert.equal(result.status, "unsafe");
+  assert.match(result.reason, /mesmo AT.*gaiolas diferentes/);
 });
 
 test("texto sem geometria/confiança nunca é evidência para envio automático", () => {

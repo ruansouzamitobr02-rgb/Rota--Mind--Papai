@@ -14,6 +14,40 @@ export type NeighborhoodSelection = {
 type Row = { text: string; words: OcrLine["words"]; confidence: number; districtText?: string; localityText?: string; trailingCellText?: string; paradas?: number; pacotes?: number };
 type Match = { row: Row; code: string; confidence: number; variant: number; regiao?: string; paradas?: number; pacotes?: number; requiresThreeEvidence?: boolean };
 
+function hasRowGeometry(row: Row) {
+  return row.words.length > 0 && row.words.every((word) =>
+    Number.isFinite(word.left) && Number.isFinite(word.top) &&
+    Number.isFinite(word.width) && word.width > 0 && Number.isFinite(word.height) && word.height > 0);
+}
+
+function hasStructuredRouteRow(match: Match) {
+  return hasRowGeometry(match.row) && !match.requiresThreeEvidence &&
+    Boolean(match.row.districtText || match.row.trailingCellText) &&
+    (match.paradas !== undefined || match.pacotes !== undefined);
+}
+
+function conflictingAtCodes(matches: Match[]) {
+  const byAt = new Map<string, Map<number, Set<string>>>();
+  for (const match of matches) {
+    const at = match.row.text.match(/\bAT[A-Z0-9]{8,}\b/i)?.[0].toUpperCase();
+    if (!at || !match.code || !hasRowGeometry(match.row)) continue;
+    const variants = byAt.get(at) || new Map<number, Set<string>>();
+    const codes = variants.get(match.variant) || new Set<string>();
+    codes.add(match.code);
+    variants.set(match.variant, codes);
+    byAt.set(at, variants);
+  }
+  const conflicts = new Set<string>();
+  for (const variants of byAt.values()) {
+    // A complete AT identifies the same row across treatments. Do not turn
+    // contradictory readings of that row into two separate candidate cages.
+    if (variants.size < 2 || [...variants.values()].some((codes) => codes.size !== 1)) continue;
+    const codes = new Set([...variants.values()].flatMap((items) => [...items]));
+    if (codes.size > 1) for (const code of codes) conflicts.add(code);
+  }
+  return conflicts;
+}
+
 export function findManualRouteCandidatesFromOcr(ocr: RouteOcrResult): DetectedRouteCode[] {
   const variants = ocr.variants?.length ? ocr.variants : [ocr];
   const found = new Map<string, Array<DetectedRouteCode & { variant: number }>>();
@@ -91,9 +125,9 @@ export function canonicalConfiguredNeighborhood(value: string) {
 
 /**
  * Selection deliberately does not use fuzzy matching or the romaneio. A row
- * must contain the complete configured neighborhood and optional region, and two OCR
- * treatments must agree on its literal cage code. Uncertainty in a preferred
- * neighborhood blocks selection instead of silently choosing a lower priority.
+ * must contain the complete configured neighborhood and optional region. A complete
+ * table row can be accepted directly; otherwise independent treatments must agree.
+ * The confidence percentage alone never vetoes either form of confirmation.
  */
 export function selectPreferredNeighborhoodFromOcr(
   ocr: RouteOcrResult,
@@ -135,7 +169,7 @@ export function selectPreferredNeighborhoodFromOcr(
         if (match) matches.push({ row, ...match, variant });
         else if (preference.regiao) {
           const otherRegion = matchPreference(row, preference, true);
-          if (otherRegion?.code && otherRegion.regiao && otherRegion.confidence >= 65
+          if (otherRegion?.code && otherRegion.regiao && hasRowGeometry(row)
             && normalizeRegionIdentity(otherRegion.regiao) !== normalizeRegionIdentity(preference.regiao)) {
             regionConflicts.add(otherRegion.code);
           }
@@ -144,23 +178,32 @@ export function selectPreferredNeighborhoodFromOcr(
     }
     if (!matches.length) continue;
 
-    // Sparse OCR can visit a later occurrence of the same neighborhood first.
-    // A weak isolated code must not veto the strong consensus for the first
-    // visual row; conflicting cages still block when they reach this same
-    // confidence floor.
-    const codes = [...new Set(matches.filter((match) => match.confidence >= 65)
+    const positionedMatches = matches.filter((match) => hasRowGeometry(match.row));
+    const variantsByCode = new Map<string, Set<number>>();
+    for (const match of positionedMatches) {
+      if (!match.code) continue;
+      const variants = variantsByCode.get(match.code) || new Set<number>();
+      variants.add(match.variant);
+      variantsByCode.set(match.code, variants);
+    }
+    // Keep isolated, unstructured OCR noise out of the candidate list. A low
+    // percentage no longer removes complete table rows or repeated readings.
+    // High-scoring isolated codes still expose contradictions as before.
+    const codes = [...new Set(positionedMatches.filter((match) => match.confidence >= 65 ||
+      hasStructuredRouteRow(match) || (variantsByCode.get(match.code)?.size || 0) >= (match.requiresThreeEvidence ? 3 : 2))
       .map((match) => match.code).filter(Boolean))];
+    const atConflicts = conflictingAtCodes(positionedMatches);
     const incomplete = matches.some((match) => !match.code);
     const byCode = codes.map((code) => {
       const matching = matches.filter((match) => match.code === code);
-      const strong = matching.filter((match) => match.confidence >= 65);
+      const positioned = matching.filter((match) => hasRowGeometry(match.row));
       const evidence = new Map<number, Match>();
-      for (const match of strong) {
+      for (const match of positioned) {
         const current = evidence.get(match.variant);
         if (!current || match.confidence > current.confidence) evidence.set(match.variant, match);
       }
       const confirmed = [...evidence.values()];
-      const best = [...matching].sort((left, right) => right.confidence - left.confidence)[0];
+      const best = [...positioned].sort((left, right) => right.confidence - left.confidence)[0];
       // A treatment can read a letter-shaped cage (for example G-2) as a
       // digit (6-2). An incomplete reading must not veto the normal consensus
       // of two independent treatments. A second valid, conflicting cage is
@@ -168,9 +211,7 @@ export function selectPreferredNeighborhoodFromOcr(
       const requiredEvidence = matching.some((match) => match.requiresThreeEvidence) ? 3 : 2;
       const stops = mostFrequentNumber(confirmed.map((match) => match.paradas).filter((value): value is number => value !== undefined));
       const packages = mostFrequentNumber(confirmed.map((match) => match.pacotes).filter((value): value is number => value !== undefined));
-      const structuralSingleReading = !preference.regiao && confirmed.length === 1 && !best.requiresThreeEvidence && best.confidence >= 65 &&
-        (best.row.districtText !== undefined || best.row.trailingCellText !== undefined) &&
-        (stops !== undefined || packages !== undefined);
+      const structuralSingleReading = !preference.regiao && confirmed.length === 1 && hasStructuredRouteRow(best);
       const detection: DetectedRouteCode = {
         route: preference.bairro,
         cidade: best.row.localityText,
@@ -183,7 +224,7 @@ export function selectPreferredNeighborhoodFromOcr(
         confidence: confirmed.length ? Math.round(Math.min(...confirmed.map((match) => match.confidence))) : best.confidence,
         evidenceCount: evidence.size,
         variantCount: variants.length,
-        safeForAutomatic: !regionConflicts.has(code) && (evidence.size >= requiredEvidence || structuralSingleReading)
+        safeForAutomatic: !regionConflicts.has(code) && !atConflicts.has(code) && (evidence.size >= requiredEvidence || structuralSingleReading)
       };
       return detection;
     });
@@ -221,9 +262,10 @@ export function selectPreferredNeighborhoodFromOcr(
     } else if (!firstFailure) {
       firstFailure = { status: "unsafe", preferenceIndex: preference.index,
         reason: regionConflicts.size ? "As leituras divergem sobre a região do bairro. Envio automático bloqueado."
+          : atConflicts.size ? "As leituras associaram o mesmo AT a gaiolas diferentes. Confira a gaiola dessa rota."
           : codes.length > 1 ? "O bairro prioritário aparece associado a gaiolas diferentes. Envio bloqueado."
           : incomplete ? "O bairro prioritário foi encontrado sem uma gaiola inequívoca na mesma linha. Envio bloqueado."
-            : "O bairro prioritário não obteve duas leituras confiáveis da mesma gaiola. Envio bloqueado." };
+            : "A associação entre o bairro e a gaiola ainda não foi confirmada pela linha da tabela ou por leituras concordantes. Confira a rota." };
     }
   }
   if (selections.length) {
@@ -558,7 +600,7 @@ function readRows(reading: RouteOcrResult): Row[] {
     if (compatible.length === 1) compatible[0].push(word);
     else groups.push([word]);
   }
-  const neighborhoodHeaders = withWords.filter((word) => /^(bairro|bairros)$/.test(normalizeNeighborhoodIdentity(word.text)) && word.confidence >= 65);
+  const neighborhoodHeaders = withWords.filter((word) => /^(bairro|bairros)$/.test(normalizeNeighborhoodIdentity(word.text)));
   const districtHeader = neighborhoodHeaders.length === 1 ? neighborhoodHeaders[0] : undefined;
   const precedingHeader = districtHeader ? withWords.filter((word) =>
     word.left + word.width < districtHeader.left &&
@@ -566,8 +608,8 @@ function readRows(reading: RouteOcrResult): Row[] {
     .sort((left, right) => right.left - left.left)[0] : undefined;
   const districtStart = districtHeader && precedingHeader
     ? (precedingHeader.left + precedingHeader.width + districtHeader.left) / 2 : undefined;
-  const clusterHeaders = withWords.filter((word) => /^(cluster|regiao)$/.test(normalizeNeighborhoodIdentity(word.text)) && word.confidence >= 65);
-  const localityHeaders = clusterHeaders.length ? clusterHeaders : withWords.filter((word) => /^cidade$/.test(normalizeNeighborhoodIdentity(word.text)) && word.confidence >= 65);
+  const clusterHeaders = withWords.filter((word) => /^(cluster|regiao)$/.test(normalizeNeighborhoodIdentity(word.text)));
+  const localityHeaders = clusterHeaders.length ? clusterHeaders : withWords.filter((word) => /^cidade$/.test(normalizeNeighborhoodIdentity(word.text)));
   const localityHeader = localityHeaders.length === 1 ? localityHeaders[0] : undefined;
   const beforeLocalityHeader = localityHeader ? withWords.filter((word) =>
     word.left + word.width < localityHeader.left &&
