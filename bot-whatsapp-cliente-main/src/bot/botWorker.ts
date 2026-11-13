@@ -162,10 +162,14 @@ async function shutdown() {
     clearTimeout(pending.timer);
     pending.reject(new Error("O bot foi encerrado antes de concluir o envio."));
   }
-  await bot?.stop().catch(() => undefined);
+  let exitCode = 0;
+  await bot?.stop().catch((error) => {
+    console.error("Falha ao salvar dados antes de encerrar o worker:", error);
+    exitCode = 1;
+  });
   shutdownIsolatedOcrWorker();
   process.disconnect?.();
-  process.exit(0);
+  process.exit(exitCode);
 }
 
 process.on("message", (message: BotWorkerIncomingMessage) => {

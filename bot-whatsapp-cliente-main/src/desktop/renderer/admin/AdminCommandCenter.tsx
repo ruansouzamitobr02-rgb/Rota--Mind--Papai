@@ -839,6 +839,7 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
     validating: "Validando integridade",
     ready: "Pronto para aplicar",
     applying: "Aplicando e reiniciando",
+    restarting: "Conferindo após reiniciar",
     completed: "Concluída",
     failed: "Falhou"
   };
@@ -2327,17 +2328,19 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
                   {cloudBackupListError ? <span className="adminx-backup-error">{cloudBackupListError}</span> : null}
                   {!cloudBackupListError && !cloudBackupObjects.length ? <span>Nenhum arquivo de backup encontrado no R2.</span> : null}
                   <section className={`adminx-restore-progress phase-${cloudRestoreStatus?.phase || "idle"}`} aria-live="polite">
+                    {cloudRestoreStatus?.storage ? <span>{cloudRestoreStatus.storage.message}</span> : null}
                     <strong>Restauração: {cloudRestoreStatus ? restorePhaseLabels[cloudRestoreStatus.phase] : "Consultando"}</strong>
                     <span>{cloudRestoreStatus?.message || "Consultando o andamento..."}</span>
                     {cloudRestoreStatus?.sourceKey ? <small>Arquivo: {cloudRestoreStatus.sourceKey}</small> : null}
+                    {cloudRestoreStatus?.summary ? <small>{cloudRestoreStatus.summary.clients} cliente(s) · {cloudRestoreStatus.summary.routes} rota(s) · {cloudRestoreStatus.summary.validatedRoutes} validada(s)</small> : null}
                     {cloudRestoreStatus?.progress !== undefined && !["completed", "failed"].includes(cloudRestoreStatus.phase)
-                      ? <progress max={100} value={cloudRestoreStatus.progress * (100 / 95)} />
+                      ? <progress max={100} value={Math.min(99, cloudRestoreStatus.progress)} />
                       : null}
                     {cloudRestoreStatus?.completedAt ? <small>Concluída em {formatDate(cloudRestoreStatus.completedAt)}</small> : null}
                   </section>
                   <span>Durante a restauração, o serviço reinicia. Os dados que já estavam nele são preservados.</span>
-                  <button className="button" disabled={!cloudBackupStatus?.configured || !selectedCloudBackupKey || cloudRestoreBusy || ["listing", "waiting_backup", "downloading", "validating", "ready", "applying"].includes(cloudRestoreStatus?.phase || "")} type="button" onClick={() => void restoreCloudBackupNow()}>
-                    {cloudRestoreBusy || ["listing", "waiting_backup", "downloading", "validating", "ready", "applying"].includes(cloudRestoreStatus?.phase || "") ? "Restauração em andamento..." : "Restaurar snapshot selecionado"}
+                  <button className="button" disabled={cloudRestoreStatus?.storage?.ready === false || !cloudBackupStatus?.configured || !selectedCloudBackupKey || cloudRestoreBusy || ["listing", "waiting_backup", "downloading", "validating", "ready", "applying", "restarting"].includes(cloudRestoreStatus?.phase || "")} type="button" onClick={() => void restoreCloudBackupNow()}>
+                    {cloudRestoreBusy || ["listing", "waiting_backup", "downloading", "validating", "ready", "applying", "restarting"].includes(cloudRestoreStatus?.phase || "") ? "Restauração em andamento..." : "Restaurar snapshot selecionado"}
                   </button>
                 </section>
                 <section className="adminx-settings-card">

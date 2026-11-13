@@ -112,17 +112,21 @@ export class BotProcessProxy extends EventEmitter {
     const child = this.child;
     this.child = undefined;
     this.rejectPending("Worker do bot encerrado.");
-    if (!child) return;
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
 
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
-        child.kill("SIGTERM");
-        resolve();
-      }, 5_000);
+        // Do not swap data while an old worker can still flush its empty state.
+        child.kill("SIGKILL");
+      }, 8_000);
       timeout.unref?.();
-      child.once("exit", () => {
+      const deadline = setTimeout(() => reject(new Error("Não foi possível encerrar o worker antes da restauração.")), 12_000);
+      deadline.unref?.();
+      child.once("exit", (code, signal) => {
         clearTimeout(timeout);
-        resolve();
+        clearTimeout(deadline);
+        if (code === 0 || signal === "SIGKILL") resolve();
+        else reject(new Error(`Worker encerrado com falha (${code ?? signal}). Os dados não serão substituídos.`));
       });
       child.send?.({ type: "shutdown" }, () => undefined);
     });

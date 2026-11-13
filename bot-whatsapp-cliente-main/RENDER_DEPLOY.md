@@ -86,10 +86,13 @@ O aplicativo grava `rota-mind-backup-v1/latest.rmbak` a cada intervalo e mantém
 
 ### Restaurar em outro serviço Render
 
-1. Crie o novo Web Service com a mesma versão do aplicativo e configure as variáveis `R2_*`, incluindo a mesma `R2_BACKUP_ENCRYPTION_KEY`.
+1. Crie o novo Web Service com a mesma versão do aplicativo. Em **Disks**, monte um disco persistente em `/data` e configure `DATA_DIR=/data`. Uma pasta gravável no contêiner, sem disco montado, perde os dados ao reiniciar; o painel recusa a restauração nesse caso. Para restaurar do R2, configure também as variáveis `R2_*`, incluindo a mesma `R2_BACKUP_ENCRYPTION_KEY`.
 2. Entre no painel como administrador, abra **Config** e aguarde o serviço ficar online.
-3. Em **Backup externo**, escolha o snapshot pelo nome, data e tamanho. O sistema pré-seleciona o maior arquivo para ajudar a localizar o backup antigo quando o serviço novo já criou uma cópia vazia. Confira a escolha antes de continuar e digite `RESTAURAR DADOS`.
+3. Em **Backup externo**, selecione manualmente o snapshot anterior à migração. Confira o nome e a data; o tamanho sozinho não garante que ele contém os dados desejados. Digite `RESTAURAR DADOS` para continuar.
 4. A tela mostra o andamento ao listar, baixar, validar e extrair o snapshot. O status fica salvo para continuar visível após o reinício; em caso de erro, a causa aparece no painel e os dados atuais não são substituídos.
-5. Após a validação, o painel fecha conexões e reinicia o serviço com os dados do snapshot escolhido. O conteúdo que já existia no novo serviço é preservado no diretório `.cloud-restore-rollback-*` dentro de `DATA_DIR`.
+5. Após a validação, o painel fecha conexões, aguarda o encerramento dos workers e reinicia o serviço com os dados do snapshot escolhido. O conteúdo que já existia no novo serviço é preservado no diretório `.cloud-restore-rollback-*` dentro de `DATA_DIR`.
+6. A restauração só mostra **Concluída** quando o servidor volta, confere a integridade dos arquivos e abre os bancos. O resultado informa quantos clientes e rotas existem no arquivo. Se a conferência falhar, os dados anteriores são recuperados automaticamente. O administrador que importou mantém sua senha atual; as contas salvas no backup são importadas sem depender de `PANEL_USERS` da conta antiga.
+
+Para um arquivo `.botbackup` salvo no celular, use **Config → Arquivo portátil (iPhone / outro site) → Conferir arquivo → Importar agora** e a senha escolhida na exportação. Esse caminho não precisa de R2, mas também exige disco persistente no Render. Se a sessão precisar ser renovada após reiniciar, entre com o administrador do novo serviço e confira o resultado em **Config**.
 
 Durante a restauração, o serviço fica indisponível por um curto período. Não remova o bucket nem altere a chave de criptografia. Uma cópia da chave precisa ser guardada fora do Render; sem ela, os backups não podem ser descriptografados.

@@ -7,6 +7,7 @@ import { Transform } from "stream";
 import { pipeline } from "stream/promises";
 import { createGunzip, createGzip } from "zlib";
 import * as tar from "tar-stream";
+import { inspectRestoreSnapshot, RestoreManifest, RestoreSummary, verifyRestoreManifest } from "./restoreIntegrity";
 
 const BACKUP_PREFIX = "rota-mind-backup-v1";
 // Backups from the previous Render setup were written with an extra folder
@@ -43,7 +44,8 @@ export type CloudBackupStatus = {
 export type CloudBackupObject = { key: string; size: number; lastModified?: string };
 
 export type CloudRestoreStatus = {
-  phase: "idle" | "listing" | "waiting_backup" | "downloading" | "validating" | "ready" | "applying" | "completed" | "failed";
+  phase: "idle" | "listing" | "waiting_backup" | "downloading" | "validating" | "ready" | "applying" | "restarting" | "completed" | "failed";
+  summary?: RestoreSummary;
   progress?: number;
   sourceKey?: string;
   message: string;
@@ -62,6 +64,7 @@ let status: CloudBackupStatus = {
 let activeBackup: Promise<void> | undefined;
 let restoring = false;
 let schedule: NodeJS.Timeout | undefined;
+let firstRun: NodeJS.Timeout | undefined;
 let client: S3Client | undefined;
 let config: BackupConfig | undefined;
 let dailySnapshotDate: string | undefined;
@@ -364,6 +367,7 @@ export async function runCloudBackup(dataDir: string) {
 }
 
 const RESTORE_JOURNAL = ".cloud-restore-journal.json";
+const RESTORE_MANIFEST = ".cloud-restore-manifest.json";
 const MAX_RESTORE_BYTES = 20 * 1024 * 1024 * 1024;
 
 function safeArchivePath(root: string, name: string) {
@@ -538,6 +542,17 @@ export async function prepareCloudRestore(dataDir: string, requestedSourceKey?: 
   }
 }
 
+export async function discardPreparedCloudRestore(dataDir: string, stageDir?: string) {
+  if (stageDir) {
+    const stage = path.resolve(stageDir);
+    if (path.dirname(stage) !== path.resolve(dataDir) || !path.basename(stage).startsWith(".cloud-restore-stage-")) {
+      throw new Error("Pasta temporária de restauração inválida.");
+    }
+    await fs.promises.rm(stage, { recursive: true, force: true });
+  }
+  restoring = false;
+}
+
 /** Applies a previously validated restore after the HTTP server and bot workers have stopped. */
 export async function applyPreparedCloudRestore(dataDir: string, stageDir: string) {
   const stage = path.resolve(stageDir);
@@ -548,16 +563,18 @@ export async function applyPreparedCloudRestore(dataDir: string, stageDir: strin
   const rollbackDir = path.join(dataDir, rollbackName);
   await fs.promises.mkdir(rollbackDir, { mode: 0o700 });
   setCloudRestoreStatus(dataDir, { phase: "applying", message: "Aplicando os dados. O serviço será reiniciado em seguida...", sourceKey: restoreStatus?.sourceKey, progress: 95 });
-  const completedStatus: CloudRestoreStatus = {
-    phase: "completed",
-    message: "Restauração concluída. Os dados do snapshot foram carregados com sucesso.",
+  const manifest = inspectRestoreSnapshot(stage);
+  const pendingStatus: CloudRestoreStatus = {
+    phase: "restarting",
+    message: "Arquivos aplicados. Aguardando o servidor reiniciar e conferir os dados salvos...",
     sourceKey: restoreStatus?.sourceKey,
     startedAt: restoreStatus?.startedAt,
     updatedAt: new Date().toISOString(),
-    completedAt: new Date().toISOString(),
-    progress: 100
+    summary: manifest.summary,
+    progress: 97
   };
-  await fs.promises.writeFile(path.join(stage, ".cloud-restore-status.json"), JSON.stringify(completedStatus), { mode: 0o600 });
+  await fs.promises.writeFile(path.join(stage, RESTORE_MANIFEST), JSON.stringify(manifest), { mode: 0o600 });
+  await fs.promises.writeFile(path.join(stage, ".cloud-restore-status.json"), JSON.stringify(pendingStatus), { mode: 0o600 });
   await writeJsonJournal(dataDir, { rollbackName, stageName: path.basename(stage), phase: "moving" });
   try {
     const currentEntries = await fs.promises.readdir(dataDir);
@@ -568,10 +585,10 @@ export async function applyPreparedCloudRestore(dataDir: string, stageDir: strin
     await writeJsonJournal(dataDir, { rollbackName, stageName: path.basename(stage), phase: "installing" });
     const restoredEntries = await fs.promises.readdir(stage);
     for (const name of restoredEntries) await fs.promises.rename(path.join(stage, name), path.join(dataDir, name));
-    await fs.promises.rm(path.join(dataDir, RESTORE_JOURNAL), { force: true });
+    await writeJsonJournal(dataDir, { rollbackName, stageName: path.basename(stage), phase: "verifying" });
     await fs.promises.rm(stage, { recursive: true, force: true });
-    restoreStatus = completedStatus;
-    console.log(`[BACKUP] RestauraÃ§Ã£o aplicada. CÃ³pia anterior preservada em ${rollbackName}.`);
+    restoreStatus = pendingStatus;
+    console.log(`[BACKUP] Restauração aplicada; aguardando verificação na inicialização. Cópia anterior preservada em ${rollbackName}.`);
   } catch (error) {
     await recoverInterruptedCloudRestore(dataDir);
     restoring = false;
@@ -579,7 +596,7 @@ export async function applyPreparedCloudRestore(dataDir: string, stageDir: strin
   }
 }
 
-async function writeJsonJournal(dataDir: string, journal: { rollbackName: string; stageName: string; phase: "moving" | "installing" }) {
+async function writeJsonJournal(dataDir: string, journal: { rollbackName: string; stageName: string; phase: "moving" | "installing" | "verifying" }) {
   const tempPath = path.join(dataDir, `${RESTORE_JOURNAL}.tmp`);
   await fs.promises.writeFile(tempPath, JSON.stringify(journal), { mode: 0o600 });
   await fs.promises.rename(tempPath, path.join(dataDir, RESTORE_JOURNAL));
@@ -588,21 +605,34 @@ async function writeJsonJournal(dataDir: string, journal: { rollbackName: string
 /** If the process dies mid-swap, restore the original files before stores open on boot. */
 export function recoverInterruptedCloudRestore(dataDir: string) {
   const journalPath = path.join(dataDir, RESTORE_JOURNAL);
-  let journal: { rollbackName?: string; stageName?: string; phase?: "moving" | "installing" };
+  let journal: { rollbackName?: string; stageName?: string; phase?: "moving" | "installing" | "verifying" };
   try {
     journal = JSON.parse(fs.readFileSync(journalPath, "utf8"));
   } catch {
     return;
   }
   if (!journal.rollbackName?.startsWith(".cloud-restore-rollback-") || !journal.stageName?.startsWith(".cloud-restore-stage-")
-    || !["moving", "installing"].includes(journal.phase || "")) {
+    || path.basename(journal.rollbackName) !== journal.rollbackName || path.basename(journal.stageName) !== journal.stageName
+    || !["moving", "installing", "verifying"].includes(journal.phase || "")) {
     throw new Error("Journal de restauraÃ§Ã£o invÃ¡lido; os dados foram mantidos sem alteraÃ§Ã£o.");
   }
   const rollbackDir = path.join(dataDir, journal.rollbackName);
   if (!fs.existsSync(rollbackDir)) throw new Error("CÃ³pia de seguranÃ§a da restauraÃ§Ã£o ausente; interrompendo inicializaÃ§Ã£o para proteger os dados.");
+  if (journal.phase === "verifying") {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(path.join(dataDir, RESTORE_MANIFEST), "utf8")) as RestoreManifest;
+      verifyRestoreManifest(dataDir, manifest);
+      // The HTTP server confirms completion only after all stores have opened.
+      restoreStatus = JSON.parse(fs.readFileSync(path.join(dataDir, ".cloud-restore-status.json"), "utf8"));
+      console.log(`[BACKUP] Dados conferidos após reiniciar: ${manifest.summary.clients} cliente(s), ${manifest.summary.routes} rota(s).`);
+      return;
+    } catch (error) {
+      console.error(`[BACKUP] Verificação falhou; recuperando dados anteriores: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   const rollbackEntries = fs.readdirSync(rollbackDir);
   const currentEntries = fs.readdirSync(dataDir);
-  if (journal.phase === "installing") {
+  if (journal.phase === "installing" || journal.phase === "verifying") {
     for (const name of currentEntries) {
       if (name === journal.rollbackName || name === journal.stageName || name === RESTORE_JOURNAL) continue;
       fs.rmSync(path.join(dataDir, name), { recursive: true, force: true });
@@ -620,6 +650,17 @@ export function recoverInterruptedCloudRestore(dataDir: string) {
   fs.writeFileSync(path.join(dataDir, ".cloud-restore-status.json"), JSON.stringify(recoveryStatus), { mode: 0o600 });
   restoreStatus = recoveryStatus;
   console.error("[BACKUP] RestauraÃ§Ã£o interrompida; dados anteriores recuperados automaticamente.");
+}
+
+export function completeCloudRestoreOnStartup(dataDir: string) {
+  const current = getCloudRestoreStatus(dataDir);
+  if (current.phase !== "restarting") return;
+  const summary = current.summary;
+  fs.rmSync(path.join(dataDir, RESTORE_JOURNAL), { force: true });
+  setCloudRestoreStatus(dataDir, {
+    phase: "completed", progress: 100, completedAt: new Date().toISOString(),
+    message: `Restauração verificada após reiniciar. ${summary?.clients || 0} cliente(s), ${summary?.routes || 0} rota(s), ${summary?.validatedRoutes || 0} validada(s).`
+  });
 }
 
 export function startCloudBackup(dataDir: string, env: NodeJS.ProcessEnv = process.env) {
@@ -647,15 +688,19 @@ export function startCloudBackup(dataDir: string, env: NodeJS.ProcessEnv = proce
   const run = () => {
     void runCloudBackup(dataDir).catch(() => undefined);
   };
-  const firstRun = setTimeout(run, 30_000);
+  firstRun = setTimeout(run, 30_000);
   firstRun.unref();
   schedule = setInterval(run, loaded.intervalMs);
   schedule.unref();
 }
 
-export function stopCloudBackup() {
+export async function stopCloudBackup() {
   if (schedule) clearInterval(schedule);
+  if (firstRun) clearTimeout(firstRun);
   schedule = undefined;
+  firstRun = undefined;
+  // Never destroy the S3 client while its archive/upload is still using it.
+  if (activeBackup) await activeBackup.catch(() => undefined);
   client?.destroy();
   client = undefined;
   config = undefined;

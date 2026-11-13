@@ -24,7 +24,8 @@ import { getCurrentRelease, shouldShowCurrentReleaseToClients } from "./releaseN
 import { RomaneioStore } from "./services/romaneio/romaneioStore";
 import { computeConditionalDispatchBlockers, computeConditionalDispatchPriorities, ConditionalPriorityClient } from "./services/conditionalDispatchPriority";
 import { DispatchRaceCoordinator } from "./services/dispatchRaceCoordinator";
-import { applyPreparedCloudRestore, createPortableEncryptedArchive, extractEncryptedArchive, getCloudBackupStatus, getCloudRestoreStatus, listCloudBackupObjects, prepareCloudRestore, recoverInterruptedCloudRestore, runCloudBackup, setCloudRestoreStatus, startCloudBackup, stopCloudBackup } from "./services/cloudBackup";
+import { applyPreparedCloudRestore, completeCloudRestoreOnStartup, createPortableEncryptedArchive, discardPreparedCloudRestore, extractEncryptedArchive, getCloudBackupStatus, getCloudRestoreStatus, listCloudBackupObjects, prepareCloudRestore, recoverInterruptedCloudRestore, runCloudBackup, setCloudRestoreStatus, startCloudBackup, stopCloudBackup } from "./services/cloudBackup";
+import { getRestoreStorageStatus, inspectRestoreSnapshot } from "./services/restoreIntegrity";
 import { AdminLogEntry, AdminMonitorSnapshot, AdminRoutesSnapshot, AdminSupportMessagesSnapshot, AdminUserDetail, AdminUsersSnapshot, BotSnapshot, DispatchMatchupRule, LeaderContact, PanelUserRole, RouteDispatch, UserPresenceStatus } from "./shared/types";
 
 const port = Number(process.env.PORT || 3000);
@@ -72,6 +73,12 @@ for (const name of fs.readdirSync(dataDir)) {
 const currentRelease = getCurrentRelease();
 const portableRestoreTickets = new Map<string, { stageDir: string; createdAt: number }>();
 const MAX_PORTABLE_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
+let restoreOperationPending = false;
+
+function assertRestoreStorageReady() {
+  const storage = getRestoreStorageStatus(dataDir);
+  if (!storage.ready) throw new HttpError(409, storage.message);
+}
 
 async function savePortableUpload(request: http.IncomingMessage, outputPath: string) {
   const declaredLength = Number(request.headers["content-length"] || 0);
@@ -88,30 +95,16 @@ async function savePortableUpload(request: http.IncomingMessage, outputPath: str
 }
 
 function countPortableRestoreFiles(stageDir: string) {
-  const summary = { files: 0, clients: 0, routes: 0, validatedRoutes: 0 };
-  function visit(directory: string) {
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      const fullPath = path.join(directory, entry.name);
-      if (entry.isDirectory()) { visit(fullPath); continue; }
-      if (!entry.isFile()) continue;
-      summary.files++;
-      const normalized = fullPath.replace(/\\/g, "/").toLowerCase();
-      if (!normalized.endsWith(".json")) continue;
-      try {
-        const parsed = JSON.parse(fs.readFileSync(fullPath, "utf8")) as unknown;
-        if (normalized.endsWith("/panel_users.json") && Array.isArray(parsed)) {
-          summary.clients = parsed.filter((item) => item && typeof item === "object" && (item as Record<string, unknown>).role === "client").length;
-        }
-        if (normalized.endsWith("/route_history.json") && Array.isArray(parsed)) {
-          summary.routes += parsed.length;
-          summary.validatedRoutes += parsed.filter((item) => item && typeof item === "object"
-            && getRouteDecisionStatus(item as RouteDispatch) === "validated").length;
-        }
-      } catch { /* An optional JSON file can have a different format. */ }
-    }
-  }
-  visit(stageDir);
-  return summary;
+  return inspectRestoreSnapshot(stageDir).summary;
+}
+
+function prepareRestoredAccounts(stageDir: string, adminEmail: string) {
+  // Imported accounts must not depend on PANEL_USERS from the previous service.
+  // Keep the importing administrator's current credentials to avoid a lockout.
+  const store = new PanelUserStore(path.join(stageDir, "panel_users.json"));
+  for (const user of store.all()) store.upsert({ email: user.email, source: "panel" });
+  const admin = panelUsers.get(adminEmail)!;
+  store.upsert({ email: adminEmail, password: admin.password, role: "admin", blocked: false, source: "panel" });
 }
 
 type PanelUserRecord = {
@@ -1410,6 +1403,11 @@ function startDailySessionReset() {
 const server = http.createServer(async (request, response) => {
   try {
     const url = new URL(request.url || "/", "http://localhost");
+    if (shuttingDown) {
+      response.setHeader("Retry-After", "5");
+      sendJson(response, 503, { error: "O servidor está reiniciando. Aguarde alguns segundos e tente novamente." });
+      return;
+    }
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Referrer-Policy", "no-referrer");
     response.setHeader("X-Frame-Options", "DENY");
@@ -1565,6 +1563,8 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === "POST" && url.pathname === "/api/admin/cloud-backup/restore") {
       if (!requireAdmin(authorizedEmail, response)) return;
+      assertRestoreStorageReady();
+      if (restoreOperationPending) throw new HttpError(409, "Já existe uma restauração em andamento.");
       const body = await readJsonBody<{ confirmation?: string; sourceKey?: string }>(request);
       if (body.confirmation !== "RESTAURAR DADOS") {
         sendJson(response, 400, { error: "ConfirmaÃ§Ã£o invÃ¡lida. A restauraÃ§Ã£o nÃ£o foi iniciada." });
@@ -1578,7 +1578,19 @@ const server = http.createServer(async (request, response) => {
         sendJson(response, 400, { error: "Selecione qual snapshot deseja restaurar." });
         return;
       }
-      const preparedRestore = await prepareCloudRestore(dataDir, body.sourceKey);
+      if (restoreOperationPending) throw new HttpError(409, "Já existe uma restauração em andamento.");
+      restoreOperationPending = true;
+      let preparedRestore: Awaited<ReturnType<typeof prepareCloudRestore>>;
+      try {
+        preparedRestore = await prepareCloudRestore(dataDir, body.sourceKey);
+        inspectRestoreSnapshot(preparedRestore.stageDir);
+        prepareRestoredAccounts(preparedRestore.stageDir, authorizedEmail);
+      } catch (error) {
+        restoreOperationPending = false;
+        await discardPreparedCloudRestore(dataDir, preparedRestore?.stageDir);
+        setCloudRestoreStatus(dataDir, { phase: "failed", message: error instanceof Error ? error.message : "Falha ao validar os dados." });
+        throw error;
+      }
       sendJson(response, 202, {
         accepted: true,
         sourceKey: preparedRestore.sourceKey,
@@ -1621,6 +1633,8 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === "POST" && url.pathname === "/api/admin/portable-backup/preview") {
       if (!requireAdmin(authorizedEmail, response)) return;
+      assertRestoreStorageReady();
+      if (restoreOperationPending) throw new HttpError(409, "Já existe uma restauração em andamento.");
       const passphrase = String(request.headers["x-backup-passphrase"] || "");
       if (passphrase.length < 12 || passphrase.length > 1024) {
         sendJson(response, 400, { error: "Digite a senha usada quando o arquivo foi exportado (mínimo de 12 caracteres)." });
@@ -1665,7 +1679,10 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === "POST" && url.pathname === "/api/admin/portable-backup/apply") {
       if (!requireAdmin(authorizedEmail, response)) return;
+      assertRestoreStorageReady();
+      if (restoreOperationPending) throw new HttpError(409, "Já existe uma restauração em andamento.");
       const body = await readJsonBody<{ ticket?: string; confirmation?: string }>(request);
+      if (restoreOperationPending) throw new HttpError(409, "Já existe uma restauração em andamento.");
       const pending = body.ticket ? portableRestoreTickets.get(body.ticket) : undefined;
       if (!pending || Date.now() - pending.createdAt > 30 * 60_000) {
         if (pending) await fs.promises.rm(pending.stageDir, { recursive: true, force: true }).catch(() => undefined);
@@ -1677,6 +1694,9 @@ const server = http.createServer(async (request, response) => {
         sendJson(response, 400, { error: "Confirmação inválida. Nenhum dado foi alterado." });
         return;
       }
+      inspectRestoreSnapshot(pending.stageDir);
+      prepareRestoredAccounts(pending.stageDir, authorizedEmail);
+      restoreOperationPending = true;
       portableRestoreTickets.delete(body.ticket!);
       setCloudRestoreStatus(dataDir, {
         phase: "ready",
@@ -1706,7 +1726,7 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === "GET" && url.pathname === "/api/admin/cloud-backup/restore-status") {
       if (!requireAdmin(authorizedEmail, response)) return;
-      sendJson(response, 200, getCloudRestoreStatus(dataDir));
+      sendJson(response, 200, { ...getCloudRestoreStatus(dataDir), storage: getRestoreStorageStatus(dataDir) });
       return;
     }
 
@@ -2272,6 +2292,7 @@ const server = http.createServer(async (request, response) => {
 });
 
 server.listen(port, "0.0.0.0", () => {
+  completeCloudRestoreOnStartup(dataDir);
   const address = server.address();
   console.log(`Painel web: http://localhost:${typeof address === "object" && address ? address.port : port}`);
   for (const address of getLocalAddresses()) {
@@ -2295,19 +2316,24 @@ async function shutdown(afterStop?: () => Promise<void>) {
   shuttingDown = true;
   clearInterval(streamHeartbeat);
   for (const response of streamAuth.keys()) response.end();
-  const deadline = setTimeout(() => process.exit(1), 10_000);
+  const deadline = setTimeout(() => {
+    console.error("[SERVER] O encerramento excedeu o prazo. A restauração será conferida na próxima inicialização.");
+    process.exit(1);
+  }, afterStop ? 120_000 : 25_000);
   deadline.unref();
   console.log("Encerrando painel e bots...");
-  stopCloudBackup();
+  const backupStopped = stopCloudBackup();
   server.close(() => {
     void (async () => {
       try {
-        await Promise.all(Array.from(bots.values()).map((item) => item.shutdown().catch(() => undefined)));
-        if (afterStop) await afterStop();
+        await Promise.all([backupStopped, ...Array.from(bots.values()).map((item) => item.shutdown())]);
+        if (typeof afterStop === "function") await afterStop();
         clearTimeout(deadline);
         process.exit(0);
       } catch (error) {
-        console.error(`[BACKUP] RestauraÃ§Ã£o nÃ£o concluÃ­da: ${error instanceof Error ? error.message : String(error)}`);
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`[SERVER] Falha ao ${afterStop ? "aplicar restauração" : "encerrar"}: ${message}`);
+        if (afterStop) setCloudRestoreStatus(dataDir, { phase: "failed", message: `A restauração não foi concluída: ${message}`, progress: undefined });
         clearTimeout(deadline);
         process.exit(1);
       }
@@ -2316,5 +2342,6 @@ async function shutdown(afterStop?: () => Promise<void>) {
   server.closeIdleConnections();
 }
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+// Node passes the signal name to listeners; it is not a restore callback.
+process.on("SIGINT", () => void shutdown());
+process.on("SIGTERM", () => void shutdown());

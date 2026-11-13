@@ -194,7 +194,9 @@ export type AdminCloudBackupStatus = {
 
 export type AdminCloudBackupObject = { key: string; size: number; lastModified?: string };
 export type AdminCloudRestoreStatus = {
-  phase: "idle" | "listing" | "waiting_backup" | "downloading" | "validating" | "ready" | "applying" | "completed" | "failed";
+  phase: "idle" | "listing" | "waiting_backup" | "downloading" | "validating" | "ready" | "applying" | "restarting" | "completed" | "failed";
+  summary?: { files: number; clients: number; routes: number; validatedRoutes: number };
+  storage?: { ready: boolean; dataDir: string; message: string };
   progress?: number;
   sourceKey?: string;
   message: string;
