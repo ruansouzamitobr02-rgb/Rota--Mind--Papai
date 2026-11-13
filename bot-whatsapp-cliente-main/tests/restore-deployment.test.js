@@ -196,3 +196,42 @@ test("HTTP: restauração sem disco persistente no Render é recusada antes de r
   assert.match(data.error, /Disks/);
   assert.equal((await server.request("/api/me")).status, 200);
 });
+
+test("HTTP: versão publicada e referência de erro identificam falha no login sem registrar senha", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "restore-login-error-"));
+  const server = await startServer(directory, { APP_RELEASE_ID: "diagnostico-deploy-teste", RENDER_GIT_COMMIT: "" });
+  t.after(async () => { await server.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const ping = await (await server.request("/api/ping")).json();
+  assert.equal(ping.release, "diagnostico-deploy-teste");
+  assert.equal(ping.restoreVerification, true);
+  await server.login();
+  fs.writeFileSync(path.join(directory, "panel_users.json"), "{incompleto");
+  const response = await server.request("/api/login", "POST", { email: adminEmail, password: "senha-do-novo-site" });
+  const data = await response.json();
+  assert.equal(response.status, 500);
+  assert.match(data.requestId, /^[a-f0-9]{12}$/);
+  assert.equal(response.headers.get("x-request-id"), data.requestId);
+  assert.match(server.logs, new RegExp(`HTTP ${data.requestId}.*POST /api/login`));
+  assert.ok(!server.logs.includes("senha-do-novo-site"));
+  assert.equal(fs.readFileSync(path.join(directory, "panel_users.json"), "utf8"), "{incompleto");
+});
+
+test("login distingue gateway HTML durante reinício de senha incorreta e não apaga sessão", async (t) => {
+  const previousWindow = global.window;
+  const previousFetch = global.fetch;
+  global.window = { localStorage: { getItem: () => "" } };
+  t.after(() => { global.window = previousWindow; global.fetch = previousFetch; });
+  const { panelLogin, isAuthError } = require("../dist/desktop/renderer/api");
+  global.fetch = async () => new Response("<html>Bad Gateway</html>", { status: 502, headers: { "content-type": "text/html" } });
+  await assert.rejects(panelLogin(adminEmail, "senha-teste"), (error) => {
+    assert.match(error.message, /reiniciando.*HTTP 502/);
+    assert.equal(isAuthError(error), false);
+    return true;
+  });
+  global.fetch = async () => new Response(JSON.stringify({ error: "Email ou senha invalidos." }), { status: 401 });
+  await assert.rejects(panelLogin(adminEmail, "senha-teste"), (error) => {
+    assert.equal(error.message, "Email ou senha invalidos.");
+    assert.equal(isAuthError(error), true);
+    return true;
+  });
+});

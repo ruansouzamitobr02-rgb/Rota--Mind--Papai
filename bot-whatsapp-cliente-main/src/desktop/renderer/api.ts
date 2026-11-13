@@ -484,7 +484,12 @@ async function fetchJson<T>(url: string, options: RequestInit = {}): Promise<T> 
   const data = await response.json().catch(() => ({}));
   if (getPanelToken() !== token) throw new Error("A sess\u00e3o mudou durante a solicita\u00e7\u00e3o.");
   if (!response.ok) {
-    throw new ApiError(data.error || "Falha ao conversar com o servidor.", response.status);
+    const unavailable = [502, 503, 504].includes(response.status);
+    const message = data?.error || (unavailable
+      ? "O servidor está reiniciando ou temporariamente indisponível. Aguarde alguns segundos e tente novamente."
+      : "Falha ao conversar com o servidor.");
+    const reference = data?.requestId || response.headers.get("x-request-id");
+    throw new ApiError(`${message}${response.status >= 500 ? ` (HTTP ${response.status}${reference ? ` · referência ${reference}` : ""})` : ""}`, response.status);
   }
 
   return data as T;

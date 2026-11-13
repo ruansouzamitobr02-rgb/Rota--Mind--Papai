@@ -1401,6 +1401,8 @@ function startDailySessionReset() {
 }
 
 const server = http.createServer(async (request, response) => {
+  const requestId = crypto.randomBytes(6).toString("hex");
+  response.setHeader("X-Request-ID", requestId);
   try {
     const url = new URL(request.url || "/", "http://localhost");
     if (shuttingDown) {
@@ -1412,7 +1414,7 @@ const server = http.createServer(async (request, response) => {
     response.setHeader("Referrer-Policy", "no-referrer");
     response.setHeader("X-Frame-Options", "DENY");
     if (request.method === "GET" && url.pathname === "/api/ping") {
-      sendJson(response, 200, { ok: true, protected: Boolean(panelUsers.size), login: "email" });
+      sendJson(response, 200, { ok: true, protected: Boolean(panelUsers.size), login: "email", release: currentRelease.id, version: currentRelease.version, restoreVerification: true });
       return;
     }
 
@@ -2286,8 +2288,12 @@ const server = http.createServer(async (request, response) => {
   } catch (error) {
     if (response.headersSent) { response.destroy(); return; }
     const status = error instanceof HttpError ? error.status : error instanceof URIError ? 400 : 500;
+    if (status >= 500) {
+      // Include the operation and reference, never passwords, tokens or body.
+      console.error(`[HTTP ${requestId}] ${request.method} ${(request.url || "/").split("?")[0]}: ${error instanceof Error ? error.message : "Erro interno"}`);
+    }
     if (status === 413 || status === 408) response.setHeader("Connection", "close");
-    sendJson(response, status, { error: error instanceof Error ? error.message : "Não foi possível concluir a operação." });
+    sendJson(response, status, { error: error instanceof Error ? error.message : "Não foi possível concluir a operação.", ...(status >= 500 ? { requestId } : {}) });
   }
 });
 
@@ -2299,6 +2305,7 @@ server.listen(port, "0.0.0.0", () => {
     console.log(`Na rede local: ${address}`);
   }
   console.log(`Dados persistentes: ${dataDir}`);
+  console.log(`Versão publicada: ${currentRelease.id}`);
   if (!panelUsers.size) {
     console.log("Aviso: defina PANEL_USERS e PANEL_ADMIN_EMAILS no Render para liberar e proteger o painel publico.");
   }
