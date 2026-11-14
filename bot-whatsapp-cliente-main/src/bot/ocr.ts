@@ -463,11 +463,10 @@ async function createPreprocessedImages(imagePath: string, preferCageCrop = fals
       const invertedBinary = `${base}-dark-inverted-binary.png`;
       const fullStats = await sharp(imagePath).rotate().grayscale().stats();
       const darkLayout = isDarkRouteImage(Number(fullStats.channels?.[0]?.mean));
-      // Dark screenshots already have strong edge contrast after inversion.
-      // Keeping fewer pixels makes Tesseract materially faster on the long
-      // tables used by the current provider without blurring the numeric cells.
+      // Small dark dashboard captures have 11–16px letters, thin grid lines
+      // and filter boxes. Shrinking them can yield an entirely empty reading.
       const ocrWidth = darkLayout
-        ? (width > 0 ? Math.min(1150, Math.max(760, Math.round(width * 0.95))) : 850)
+        ? (width > 0 ? Math.min(2400, Math.max(1400, Math.round(width * 1.8))) : 1600)
         : completeWidth;
       const standardVariants = [
         { path: contrast, label: "bairros-tabela-completa-contraste", generated: true, psm: 6 },
@@ -478,12 +477,18 @@ async function createPreprocessedImages(imagePath: string, preferCageCrop = fals
       ];
       const orderedVariants = darkLayout ? [
         { path: inverted, label: "bairros-tabela-escura-invertida", generated: true, psm: 6 },
+        { path: inverted, label: "bairros-tabela-escura-esparsa", generated: false, psm: 11 },
         { path: invertedBinary, label: "bairros-tabela-escura-binaria", generated: true, psm: 6 },
         ...standardVariants
       ] : standardVariants;
       const selectedVariants = orderedVariants.slice(0, Math.max(1, maxVariants || orderedVariants.length));
       const selectedPaths = new Set(selectedVariants.filter((variant) => variant.generated).map((variant) => variant.path));
       generatedPaths.push(...selectedPaths);
+      let darkInput: Promise<Buffer> | undefined;
+      const normalizedDarkInput = () => darkInput ||= sharp(imagePath).rotate().resize({ width: ocrWidth })
+        // PNG screenshots can be RGBA even when entirely opaque. Negating
+        // their alpha makes all text transparent and sharpening erases it.
+        .removeAlpha().grayscale().negate({ alpha: false }).normalize().png().toBuffer();
       const jobs = new Map<string, () => Promise<unknown>>([
         [contrast, () => sharp(imagePath).rotate().trim({ threshold: 10 }).resize({ width: ocrWidth }).grayscale().normalize()
           .sharpen({ sigma: 0.9, m1: 0.8, m2: 1.8 }).png().toFile(contrast)],
@@ -491,10 +496,12 @@ async function createPreprocessedImages(imagePath: string, preferCageCrop = fals
           .linear(1.12, -8).sharpen({ sigma: 0.45 }).png().toFile(soft)],
         [binary, () => sharp(imagePath).rotate().trim({ threshold: 10 }).resize({ width: ocrWidth }).grayscale().normalize()
           .threshold(165).png().toFile(binary)],
-        [inverted, () => sharp(imagePath).rotate().trim({ threshold: 10 }).resize({ width: ocrWidth }).grayscale().negate().normalize()
-          .linear(1.08, -4).sharpen({ sigma: 0.75 }).png().toFile(inverted)],
-        [invertedBinary, () => sharp(imagePath).rotate().trim({ threshold: 10 }).resize({ width: ocrWidth }).grayscale().negate().normalize()
-          .threshold(150).png().toFile(invertedBinary)]
+        // Whiten the normalized background and add padding after inversion,
+        // so grid lines fade without inverting the border or sharpening J to I.
+        [inverted, async () => sharp(await normalizedDarkInput()).linear(1.5, -12)
+          .extend({ top: 16, bottom: 16, left: 16, right: 16, background: "white" }).png().toFile(inverted)],
+        [invertedBinary, async () => sharp(await normalizedDarkInput())
+          .threshold(180).extend({ top: 16, bottom: 16, left: 16, right: 16, background: "white" }).png().toFile(invertedBinary)]
       ]);
       await Promise.all([...selectedPaths].map((selectedPath) => jobs.get(selectedPath)!()));
       return selectedVariants;

@@ -602,23 +602,16 @@ function readRows(reading: RouteOcrResult): Row[] {
   }
   const neighborhoodHeaders = withWords.filter((word) => /^(bairro|bairros)$/.test(normalizeNeighborhoodIdentity(word.text)));
   const districtHeader = neighborhoodHeaders.length === 1 ? neighborhoodHeaders[0] : undefined;
-  const precedingHeader = districtHeader ? withWords.filter((word) =>
-    word.left + word.width < districtHeader.left &&
-    Math.abs(word.top - districtHeader.top) <= districtHeader.height * 0.4)
-    .sort((left, right) => right.left - left.left)[0] : undefined;
-  const districtStart = districtHeader && precedingHeader
-    ? (precedingHeader.left + precedingHeader.width + districtHeader.left) / 2 : undefined;
+  // Labels and cell text are left aligned. Half the whitespace between short
+  // labels cuts through long CLUSTER values and even includes SPR in CLUSTER.
+  const cellStart = (header: OcrLine["words"][number]) => header.left - Math.min(10, header.height * 0.5);
+  const districtStart = districtHeader ? cellStart(districtHeader) : undefined;
   const clusterHeaders = withWords.filter((word) => /^(cluster|regiao)$/.test(normalizeNeighborhoodIdentity(word.text)));
   const localityHeaders = clusterHeaders.length ? clusterHeaders : withWords.filter((word) => /^cidade$/.test(normalizeNeighborhoodIdentity(word.text)));
   const localityHeader = localityHeaders.length === 1 ? localityHeaders[0] : undefined;
-  const beforeLocalityHeader = localityHeader ? withWords.filter((word) =>
-    word.left + word.width < localityHeader.left &&
-    Math.abs(word.top - localityHeader.top) <= localityHeader.height * 0.4)
-    .sort((left, right) => right.left - left.left)[0] : undefined;
-  const localityStart = localityHeader && beforeLocalityHeader
-    ? (beforeLocalityHeader.left + beforeLocalityHeader.width + localityHeader.left) / 2 : undefined;
+  const localityStart = localityHeader ? cellStart(localityHeader) : undefined;
   const localityEnd = localityHeader && districtHeader && localityHeader.left < districtHeader.left
-    ? (localityHeader.left + localityHeader.width + districtHeader.left) / 2 : undefined;
+    ? districtStart : undefined;
   const metricColumns = detectMetricColumns(groups);
   return groups.map((words) => {
     const sorted = [...words].sort((left, right) => left.left - right.left);
@@ -637,7 +630,25 @@ function readRows(reading: RouteOcrResult): Row[] {
   });
 }
 
-function detectMetricColumns(groups: OcrLine["words"][]) {
+type MetricColumn = { center: number; tolerance: number; left?: number; right?: number; below?: number };
+
+function detectMetricColumns(groups: OcrLine["words"][]): MetricColumn[] {
+  for (const words of groups) {
+    const stops = words.filter(word => /^paradas?$/.test(normalizeNeighborhoodIdentity(word.text)));
+    const packages = words.filter(word => /^(spr|pacotes?|volumes?)$/.test(normalizeNeighborhoodIdentity(word.text)));
+    if (stops.length !== 1 || packages.length !== 1 || stops[0].left >= packages[0].left) continue;
+    const headers = [...words].sort((a, b) => a.left - b.left);
+    const afterPackages = headers.find(word => word.left > packages[0].left + packages[0].width);
+    if (!afterPackages || !/^(cluster|cidade|regiao)$/.test(normalizeNeighborhoodIdentity(afterPackages.text))) continue;
+    const start = (word: OcrLine["words"][number]) => word.left - Math.min(10, word.height * 0.5);
+    const boundaries = [start(stops[0]), start(packages[0]), start(afterPackages)];
+    return [0, 1].map(index => ({
+      left: boundaries[index], right: boundaries[index + 1],
+      center: (boundaries[index] + boundaries[index + 1]) / 2,
+      tolerance: (boundaries[index + 1] - boundaries[index]) / 2,
+      below: Math.max(stops[0].top + stops[0].height, packages[0].top + packages[0].height)
+    }));
+  }
   const heights = groups.flat().map((word) => word.height).filter((height) => height > 0).sort((a, b) => a - b);
   const typicalHeight = heights[Math.floor(heights.length / 2)] || 12;
   const tolerance = Math.max(12, typicalHeight * 1.8);
@@ -666,14 +677,17 @@ function detectMetricColumns(groups: OcrLine["words"][]) {
   return columns.length === 2 ? columns : [];
 }
 
-function inferRowQuantities(words: OcrLine["words"], columns: Array<{ center: number; tolerance: number }>) {
+function inferRowQuantities(words: OcrLine["words"], columns: MetricColumn[]) {
   const numericWords = dedupeNumericWords(words, true);
   if (!numericWords.length || !columns.length) return {};
   const values = columns.map((column) => {
     const nearest = numericWords.map((word) => ({
       value: validMetricQuantity(word.text),
-      distance: Math.abs(word.left + word.width / 2 - column.center)
-    })).filter((item) => item.value !== undefined && item.distance <= column.tolerance)
+      distance: Math.abs(word.left + word.width / 2 - column.center),
+      within: (column.left === undefined || word.left + word.width / 2 >= column.left)
+        && (column.right === undefined || word.left + word.width / 2 < column.right)
+        && (column.below === undefined || word.top > column.below)
+    })).filter((item) => item.within && item.value !== undefined && item.distance <= column.tolerance)
       .sort((left, right) => left.distance - right.distance)[0];
     return nearest?.value;
   });
@@ -685,7 +699,7 @@ function inferRowQuantities(words: OcrLine["words"], columns: Array<{ center: nu
 function dedupeNumericWords(words: OcrLine["words"], allowMisreadFour: boolean) {
   const found: OcrLine["words"] = [];
   for (const word of [...words].sort((left, right) => left.left - right.left)) {
-    const token = word.text.trim();
+    const token = word.text.trim().replace(/[.,]$/, "");
     if (!(allowMisreadFour ? /^[0-9uU]{1,3}$/ : /^\d{1,3}$/).test(token)) continue;
     const center = word.left + word.width / 2;
     if (found.some((existing) => Math.abs(existing.left + existing.width / 2 - center) <= Math.max(4, word.width * 0.35))) continue;
@@ -698,7 +712,7 @@ function validMetricQuantity(value: string | number) {
   // In these compressed screenshots the open top of digit 4 is repeatedly
   // recognized as "u". Recover it only after table geometry has proven that
   // the token sits inside PARADAS or PACOTES.
-  return validQuantity(String(value).replace(/[uU]/g, "4"));
+  return validQuantity(String(value).replace(/[.,]$/, "").replace(/[uU]/g, "4"));
 }
 
 function inferTrailingCellText(words: OcrLine["words"]) {
