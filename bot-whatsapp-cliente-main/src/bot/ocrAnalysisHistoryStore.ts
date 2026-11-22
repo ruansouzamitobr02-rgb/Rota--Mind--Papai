@@ -1,5 +1,5 @@
 import fs from "fs";
-import { writeJsonAtomicAsync } from "../storageJson";
+import { readJsonFileWithBackup, writeJsonAtomicAsync } from "../storageJson";
 import { OcrRouteSelectionState } from "../shared/types";
 
 const MAX_ANALYSES = 30;
@@ -27,20 +27,20 @@ export class OcrAnalysisHistoryStore {
   }
 
   private load(): OcrRouteSelectionState[] {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(this.filePath, "utf8"));
-      if (!Array.isArray(parsed)) return [];
-      return parsed.filter((item) => item && typeof item === "object" && Array.isArray(item.options) && !["idle", "analyzing"].includes(item.status)).slice(0, MAX_ANALYSES);
-    } catch {
-      return [];
-    }
+    const parsed = readJsonFileWithBackup<any[]>(this.filePath, () => [], Array.isArray);
+    return parsed.filter(item => item && typeof item === "object" && Array.isArray(item.options) && !["idle", "analyzing"].includes(item.status)).slice(0, MAX_ANALYSES);
   }
 
   flush() {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = undefined;
     const snapshot = JSON.parse(JSON.stringify(this.items)) as OcrRouteSelectionState[];
-    this.saveChain = this.saveChain.catch(() => undefined).then(() => writeJsonAtomicAsync(this.filePath, snapshot));
+    this.saveChain = this.saveChain.catch(() => undefined).then(async () => {
+      let previous: unknown;
+      try { previous = JSON.parse(await fs.promises.readFile(this.filePath, "utf8")); } catch { /* Keep a valid existing backup. */ }
+      if (Array.isArray(previous)) await writeJsonAtomicAsync(`${this.filePath}.bak`, previous);
+      await writeJsonAtomicAsync(this.filePath, snapshot);
+    });
     return this.saveChain;
   }
 

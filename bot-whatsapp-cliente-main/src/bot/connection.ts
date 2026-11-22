@@ -197,6 +197,7 @@ export class BotService extends EventEmitter {
   private pendingReactionBatch?: any[];
   private reactionProcessingScheduled = false;
   private monitoringEnabled = false;
+  private monitoringOperation = 0;
   private monitoringMode: MonitoringMode = "target";
   private estadoInicialDoGrupoCapturado = false;
   private grupoJaFechouDepoisDoInicio = false;
@@ -826,6 +827,9 @@ export class BotService extends EventEmitter {
       this.logger.warning("Conecte o WhatsApp antes de ativar o monitoramento.");
       return false;
     }
+    const operation = ++this.monitoringOperation;
+    const socket = this.sock;
+    const isCurrent = () => operation === this.monitoringOperation && socket === this.sock && this.status === "connected" && !this.stopping;
 
     this.monitoringMode = "target";
     const modeLabel = targetDispatchMode === "ocr" ? "bot imagem" : useNuclearMode ? "modo nuclear" : "bot manual";
@@ -855,6 +859,7 @@ export class BotService extends EventEmitter {
     }
 
     await this.captureInitialGroupState();
+    if (!isCurrent()) return false;
     this.monitoringEnabled = true;
     this.armedAt = Date.now();
     this.addStatusEvent("armed", `Bot armado em modo ${modeLabel}.`);
@@ -863,6 +868,7 @@ export class BotService extends EventEmitter {
     if (this.groupState !== "open") {
       await this.waitForInitialInternalWarmup(initialWarmup);
     }
+    if (!isCurrent() || !this.monitoringEnabled) return false;
     this.logger.success(targetDispatchMode === "ocr" ? "✅ BOT IMAGEM ARMADO. Aguardando foto da rota..." : useNuclearMode ? "✅ Bot NUCLEAR ARMADO. Aguardando abertura do grupo..." : "✅ Bot MANUAL ARMADO. Aguardando abertura do grupo...");
     this.dispatchIfGroupAlreadyOpen("armado");
     this.emitSnapshot();
@@ -874,6 +880,9 @@ export class BotService extends EventEmitter {
       this.logger.warning("Conecte o WhatsApp antes de ativar o monitoramento de teste.");
       return false;
     }
+    const operation = ++this.monitoringOperation;
+    const socket = this.sock;
+    const isCurrent = () => operation === this.monitoringOperation && socket === this.sock && this.status === "connected" && !this.stopping;
 
     const config = this.configStore.load();
     if (!config.grupoTesteJid && !config.grupoTesteNome) {
@@ -882,6 +891,7 @@ export class BotService extends EventEmitter {
     }
 
     const testGroup = await this.resolveWarmupTarget(config);
+    if (!isCurrent()) return false;
     if (!testGroup?.jid) {
       this.logger.warning("Não foi possível resolver o grupo de teste para monitorar abertura e fechamento.");
       return false;
@@ -909,6 +919,7 @@ export class BotService extends EventEmitter {
     }
 
     await this.captureInitialGroupState();
+    if (!isCurrent()) return false;
     this.monitoringEnabled = true;
     this.armedAt = Date.now();
     this.addStatusEvent("armed", "Bot de teste armado.");
@@ -920,6 +931,7 @@ export class BotService extends EventEmitter {
   }
 
   disableMonitoring(): void {
+    this.monitoringOperation++;
     this.monitoringEnabled = false;
     this.monitoringMode = "target";
     this.cancelPendingRouteImageBatch();
@@ -986,11 +998,17 @@ export class BotService extends EventEmitter {
       this.emitSnapshot();
       return false;
     }
+    const operation = this.monitoringOperation;
+    const socket = this.sock;
+    const previousCycle = this.sendCycleId;
+    const isCurrent = () => operation === this.monitoringOperation && previousCycle === this.sendCycleId
+      && socket === this.sock && this.status === "connected" && !this.stopping;
 
     this.monitoringMode = "target";
     this.refreshSocketJidFilterCache();
     if (!this.configStore.load().grupoAlvoJid && this.configStore.load().grupoAlvoNome) {
       await this.resolveConfiguredGroup();
+      if (!isCurrent()) return false;
     }
 
     const config = this.configStore.load();
@@ -1008,6 +1026,7 @@ export class BotService extends EventEmitter {
     if (this.getCurrentInternalWarmState() !== "ready") {
       this.logger.info("Preparando criptografia do grupo antes do disparo manual...");
       const warmed = await this.runWarmKeepAlive("armado");
+      if (!isCurrent()) return false;
       if (!warmed || this.getCurrentInternalWarmState() !== "ready") {
         this.logger.warning("Disparo manual aguardando preparação interna. Tente novamente quando o painel indicar conexão aquecida.");
         this.emitSnapshot();
@@ -1017,11 +1036,13 @@ export class BotService extends EventEmitter {
 
     try {
       const metadata = await this.refreshGroupMetadata(targetJid);
+      if (!isCurrent()) return false;
       this.groupState = metadata?.announce === false ? "open" : "closed";
     } catch (error) {
       this.logger.warning(`Não consegui confirmar o estado do grupo: ${this.getErrorMessage(error)}`);
     }
 
+    if (!isCurrent()) return false;
     if (this.groupState !== "open") {
       this.logger.error("Disparo manual bloqueado: o grupo ainda está fechado.");
       this.emitSnapshot();
@@ -1173,6 +1194,7 @@ export class BotService extends EventEmitter {
   }
 
   async stop() {
+    this.monitoringOperation++;
     this.monitoringEnabled = false;
     this.monitoringMode = "target";
     this.stopping = true;
@@ -4365,6 +4387,7 @@ export class BotService extends EventEmitter {
   }
 
   private stopMonitoringAfterTargetDispatch(cycleId: number) {
+    if (cycleId !== this.sendCycleId) return;
     if (this.targetSimulationCycles.has(cycleId)) return;
     if (this.monitoringMode !== "target") return;
     if (!this.monitoringEnabled) return;

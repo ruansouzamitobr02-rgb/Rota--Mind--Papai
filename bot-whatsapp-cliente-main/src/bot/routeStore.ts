@@ -1,7 +1,7 @@
 import fs from "fs";
 import { RouteClientIncident, RouteDeletionEvent, RouteDispatch, RouteDispatchTimeline, RouteReaction, RouteReactionFinalState, RouteReactionHistoryEvent } from "../shared/types";
 import { isRouteDeleted } from "../shared/routeLifecycle";
-import { writeJsonAtomic } from "../storageJson";
+import { readJsonFileWithBackup, writeJsonAtomic } from "../storageJson";
 
 const MAX_ROUTES = 50_000;
 const INCIDENT_SNOOZE_DELAYS_MINUTES = [10, 5, 2];
@@ -298,16 +298,8 @@ export class RouteStore {
   }
 
   private load(): RouteDispatch[] {
-    for (const candidate of [this.filePath, `${this.filePath}.bak`]) {
-      if (!fs.existsSync(candidate)) continue;
-      try {
-        const data = JSON.parse(fs.readFileSync(candidate, "utf-8"));
-        if (Array.isArray(data)) return data.map((item) => this.normalize(item)).filter(Boolean).slice(0, MAX_ROUTES) as RouteDispatch[];
-      } catch {
-        // Um arquivo interrompido não pode apagar o histórico válido do backup.
-      }
-    }
-    return [];
+    const data = readJsonFileWithBackup<unknown[]>(this.filePath, () => [], Array.isArray);
+    return data.map(item => this.normalize(item)).filter(Boolean).slice(0, MAX_ROUTES) as RouteDispatch[];
   }
 
   private saveNow(routes: RouteDispatch[]) {

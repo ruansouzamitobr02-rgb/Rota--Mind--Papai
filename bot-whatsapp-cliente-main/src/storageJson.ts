@@ -20,6 +20,17 @@ export function readJsonFile<T>(filePath: string, fallback: () => T, validate?: 
   }
 }
 
+export function readJsonFileWithBackup<T>(filePath: string, fallback: () => T, validate?: (value: unknown) => boolean): T {
+  let failure: Error | undefined;
+  for (const candidate of [filePath, `${filePath}.bak`]) {
+    if (!fs.existsSync(candidate)) continue;
+    try { return readJsonFile(candidate, fallback, validate); }
+    catch (error) { failure ||= error instanceof Error ? error : new Error(String(error)); }
+  }
+  if (failure) throw failure;
+  return fallback();
+}
+
 export function writeJsonAtomic(filePath: string, value: unknown): void {
   const serialized = JSON.stringify(value, null, 2);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });

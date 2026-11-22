@@ -286,7 +286,7 @@ function scheduleConditionalPrioritySync() {
   if (conditionalPriorityTimer) return;
   conditionalPriorityTimer = setTimeout(() => {
     conditionalPriorityTimer = undefined;
-    void syncConditionalDispatchPriorities();
+    void syncConditionalDispatchPriorities().catch(error => console.error("Falha ao sincronizar prioridades:", error));
   }, 20);
   conditionalPriorityTimer.unref?.();
 }
@@ -1063,9 +1063,13 @@ function notifyClientsAboutUpcomingPayments() {
     broadcastSnapshot(email);
   }
 }
-const financeReminderTimer = setInterval(notifyClientsAboutUpcomingPayments, 60 * 60_000);
+function notifyClientsAboutUpcomingPaymentsSafely() {
+  try { notifyClientsAboutUpcomingPayments(); }
+  catch (error) { console.error("Falha ao preparar lembretes de pagamento:", error); }
+}
+const financeReminderTimer = setInterval(notifyClientsAboutUpcomingPaymentsSafely, 60 * 60_000);
 financeReminderTimer.unref();
-setTimeout(notifyClientsAboutUpcomingPayments, 10_000).unref();
+setTimeout(notifyClientsAboutUpcomingPaymentsSafely, 10_000).unref();
 
 function sendAdminPush(notification: Parameters<PushNotificationStore["sendToRole"]>[1]) {
   void pushNotificationStore.sendToEmails(Array.from(panelUsers.entries()).filter(([, user]) => user.role === "admin" && !user.blocked).map(([email]) => email), notification).catch((error) => console.error("Falha ao enviar notificação ao admin:", error));

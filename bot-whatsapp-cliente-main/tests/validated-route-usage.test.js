@@ -38,16 +38,16 @@ test("regra reconhece Fernando e permite email exato configurado sem atingir out
   assert.equal(isAlwaysBillableValidatedRouteClient("alan@teste.com", ""), false);
 });
 
-test("admin controla por cliente a cobranca de rotas manuais target e IA", () => {
+test("todas as rotas validadas são cobradas, inclusive com preferência legada de somente IA", () => {
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "client-route-billing-")), "usage.json");
   const store = new ImageUsageStore(file);
-  assert.equal(store.billsAllValidatedRoutes("cliente@teste.com"), false);
+  assert.equal(store.billsAllValidatedRoutes("cliente@teste.com"), true);
   store.setBillAllValidatedRoutes("cliente@teste.com", true);
   assert.equal(store.billsAllValidatedRoutes("cliente@teste.com"), true);
   assert.equal(store.snapshot().clients.find((client) => client.clientEmail === "cliente@teste.com").billAllValidatedRoutes, true);
   assert.equal(new ImageUsageStore(file).billsAllValidatedRoutes("cliente@teste.com"), true);
 
   store.setBillAllValidatedRoutes("fernando@teste.com", false);
-  assert.equal(store.billsAllValidatedRoutes("fernando@teste.com"), false);
-  assert.equal(new ImageUsageStore(file).billsAllValidatedRoutes("fernando@teste.com"), false);
+  assert.equal(store.billsAllValidatedRoutes("fernando@teste.com"), true);
+  assert.equal(new ImageUsageStore(file).billsAllValidatedRoutes("fernando@teste.com"), true);
 });

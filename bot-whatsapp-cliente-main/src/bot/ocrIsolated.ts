@@ -3,6 +3,7 @@ import os from "os";
 import path from "path";
 import { RouteOcrResult } from "./ocr";
 import { readRouteImageOcrCoordinated } from "./ocrCoordinator";
+import { sendWorkerMessage } from "./workerIpc";
 
 type OcrOptions = { maxReadings?: number; fastFirst?: boolean; preferCageCrop?: boolean };
 type PendingRequest = {
@@ -13,7 +14,7 @@ type PendingRequest = {
 };
 
 const OCR_WORKER_TIMEOUT_MS = 120_000;
-const RETRYABLE_WORKER_ERROR = /SIGBUS|encerrou inesperadamente|worker da IA falhou|EPIPE/i;
+const RETRYABLE_WORKER_ERROR = /SIGBUS|encerrou inesperadamente|worker da IA falhou|EPIPE|canal.*desconectado|channel closed/i;
 const pendingRequests = new Map<string, PendingRequest>();
 let worker: ChildProcess | undefined;
 let requestSequence = 0;
@@ -46,10 +47,8 @@ function requestIsolatedOcr(imagePath: string, options: OcrOptions) {
     }, OCR_WORKER_TIMEOUT_MS);
     timer.unref?.();
     pendingRequests.set(id, { resolve, reject, timer, worker: activeWorker });
-    activeWorker.send?.({ type: "analyze", id, imagePath, options }, (error) => {
-      if (!error) return;
-      settleRequest(id, undefined, error.message);
-    });
+    sendWorkerMessage(activeWorker, { type: "analyze", id, imagePath, options }, error =>
+      recycleWorker(activeWorker, `Worker da IA falhou: ${error.message}`));
   });
 }
 
@@ -57,9 +56,7 @@ export function warmupIsolatedOcrWorker() {
   if (!shouldUseIsolatedOcr() || warmupRequested) return;
   const activeWorker = getWorker();
   warmupRequested = true;
-  activeWorker.send?.({ type: "warmup" }, (error) => {
-    if (error) warmupRequested = false;
-  });
+  sendWorkerMessage(activeWorker, { type: "warmup" }, error => recycleWorker(activeWorker, `Worker da IA falhou: ${error.message}`));
 }
 
 export function shutdownIsolatedOcrWorker() {
@@ -68,6 +65,7 @@ export function shutdownIsolatedOcrWorker() {
   worker = undefined;
   warmupRequested = false;
   current.removeAllListeners();
+  current.on("error", () => undefined);
   current.kill();
   rejectAllPending("Worker da IA encerrado.");
 }
@@ -92,13 +90,18 @@ function getWorker() {
   }
   const activeWorker = worker;
   worker.on("message", (message: any) => {
+    if (worker !== activeWorker) return;
     if (!message || message.type !== "result" || typeof message.id !== "string") return;
     settleRequest(message.id, message.result, message.error);
   });
   worker.on("error", (error) => {
     recycleWorker(activeWorker, `Worker da IA falhou: ${error.message}`);
   });
+  worker.on("disconnect", () => {
+    if (worker === activeWorker) recycleWorker(activeWorker, "Canal do worker da IA desconectado.");
+  });
   worker.on("exit", (code, signal) => {
+    if (worker !== activeWorker) return;
     worker = undefined;
     warmupRequested = false;
     rejectAllPending(`Worker da IA encerrou inesperadamente (${code ?? signal ?? "sem código"}).`);

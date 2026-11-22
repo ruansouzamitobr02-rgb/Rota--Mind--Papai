@@ -176,6 +176,8 @@ export async function createEncryptedArchive(dataDir: string, outputPath: string
 
   output.write(header);
   const completed = pipeline(archive, gzip, cipher, output);
+  let pipelineError: unknown;
+  void completed.catch(error => { pipelineError = error; });
   try {
     await addDirectoryToArchive(archive, dataDir, path.dirname(outputPath));
     archive.finalize();
@@ -184,8 +186,9 @@ export async function createEncryptedArchive(dataDir: string, outputPath: string
   } catch (error) {
     archive.destroy(error instanceof Error ? error : undefined);
     output.destroy();
+    await completed.catch(() => undefined);
     await fs.promises.unlink(outputPath).catch(() => undefined);
-    throw error;
+    throw pipelineError || error;
   }
 }
 
@@ -209,6 +212,8 @@ export async function createPortableEncryptedArchive(dataDir: string, outputPath
   const gzip = createGzip({ level: 1 });
   output.write(Buffer.concat([PORTABLE_BACKUP_MAGIC, salt, iv]));
   const completed = pipeline(archive, gzip, cipher, output);
+  let pipelineError: unknown;
+  void completed.catch(error => { pipelineError = error; });
   try {
     await addDirectoryToArchive(archive, dataDir, path.dirname(outputPath));
     archive.finalize();
@@ -217,8 +222,9 @@ export async function createPortableEncryptedArchive(dataDir: string, outputPath
   } catch (error) {
     archive.destroy(error instanceof Error ? error : undefined);
     output.destroy();
+    await completed.catch(() => undefined);
     await fs.promises.unlink(outputPath).catch(() => undefined);
-    throw error;
+    throw pipelineError || error;
   }
 }
 
@@ -322,9 +328,10 @@ export async function runCloudBackup(dataDir: string) {
   activeBackup = (async () => {
     const attemptedAt = new Date();
     status = { ...status, running: true, lastAttemptAt: attemptedAt.toISOString(), lastError: undefined };
-    const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "rota-mind-backup-"));
-    const encryptedPath = path.join(tempDir, "snapshot.rmbak");
+    let tempDir: string | undefined;
     try {
+      tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "rota-mind-backup-"));
+      const encryptedPath = path.join(tempDir, "snapshot.rmbak");
       await createEncryptedArchive(dataDir, encryptedPath, config!.encryptionKey);
       const date = attemptedAt.toISOString();
       const latestKey = `${BACKUP_PREFIX}/latest.rmbak`;
@@ -356,7 +363,7 @@ export async function runCloudBackup(dataDir: string) {
       throw error;
     } finally {
       status = { ...status, running: false };
-      await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+      if (tempDir) await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
     }
   })();
   try {
@@ -475,10 +482,11 @@ export async function prepareCloudRestore(dataDir: string, requestedSourceKey?: 
   if (!config || !client) throw new Error("O backup na nuvem nÃ£o estÃ¡ configurado neste servidor.");
   if (restoring) throw new Error("JÃ¡ existe uma restauraÃ§Ã£o em andamento.");
   restoring = true;
-  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "rota-mind-restore-"));
-  const archivePath = path.join(tempDir, "selected.rmbak");
+  let tempDir: string | undefined;
   const stageDir = path.join(dataDir, `.cloud-restore-stage-${crypto.randomUUID()}`);
   try {
+    tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "rota-mind-restore-"));
+    const archivePath = path.join(tempDir, "selected.rmbak");
     setCloudRestoreStatus(dataDir, {
       phase: activeBackup ? "waiting_backup" : "listing",
       message: activeBackup ? "Aguardando o backup em andamento terminar..." : "Localizando o snapshot selecionado...",
@@ -535,10 +543,10 @@ export async function prepareCloudRestore(dataDir: string, requestedSourceKey?: 
     restoring = false;
     setCloudRestoreStatus(dataDir, { phase: "failed", message: error instanceof Error ? error.message : "Falha ao preparar a restauração.", sourceKey: requestedSourceKey, progress: undefined });
     await fs.promises.rm(stageDir, { recursive: true, force: true }).catch(() => undefined);
-    await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+    if (tempDir) await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
     throw error;
   } finally {
-    await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+    if (tempDir) await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
@@ -608,8 +616,9 @@ export function recoverInterruptedCloudRestore(dataDir: string) {
   let journal: { rollbackName?: string; stageName?: string; phase?: "moving" | "installing" | "verifying" };
   try {
     journal = JSON.parse(fs.readFileSync(journalPath, "utf8"));
-  } catch {
-    return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new Error("Registro de restauração inválido. A inicialização foi interrompida para preservar os dados existentes.");
   }
   if (!journal.rollbackName?.startsWith(".cloud-restore-rollback-") || !journal.stageName?.startsWith(".cloud-restore-stage-")
     || path.basename(journal.rollbackName) !== journal.rollbackName || path.basename(journal.stageName) !== journal.stageName

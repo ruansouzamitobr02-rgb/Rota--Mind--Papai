@@ -5,6 +5,7 @@ import { DEFAULT_CONFIG } from "./config";
 import type { BotServiceOptions } from "./connection";
 import type { BotWorkerOutgoingMessage } from "./botProcessProtocol";
 import type { BotSnapshot, LeaderContact, RouteDispatch } from "../shared/types";
+import { sendWorkerMessage } from "./workerIpc";
 
 type PendingCall = {
   resolve: (value: any) => void;
@@ -22,6 +23,7 @@ type RecoveryIntent = {
 
 const CALL_TIMEOUT_MS = 120_000;
 const RESTART_DELAY_MS = 1_000;
+const STARTUP_TIMEOUT_MS = 30_000;
 
 function initialSnapshot(): BotSnapshot {
   return {
@@ -68,6 +70,10 @@ export class BotProcessProxy extends EventEmitter {
   private resolveReady?: () => void;
   private rejectReady?: (error: Error) => void;
   private restartTimer?: NodeJS.Timeout;
+  private startupTimer?: NodeJS.Timeout;
+  private workerStartedAt = 0;
+  private workerWasReady = false;
+  private consecutiveWorkerFailures = 0;
   private intentionalShutdown = false;
   private critical = false;
   private recoveryIntent?: RecoveryIntent;
@@ -107,6 +113,7 @@ export class BotProcessProxy extends EventEmitter {
 
   async shutdown() {
     this.intentionalShutdown = true;
+    if (this.startupTimer) clearTimeout(this.startupTimer);
     this.rejectReady?.(new Error("Worker do bot encerrado."));
     if (this.restartTimer) clearTimeout(this.restartTimer);
     const child = this.child;
@@ -128,7 +135,7 @@ export class BotProcessProxy extends EventEmitter {
         if (code === 0 || signal === "SIGKILL") resolve();
         else reject(new Error(`Worker encerrado com falha (${code ?? signal}). Os dados não serão substituídos.`));
       });
-      child.send?.({ type: "shutdown" }, () => undefined);
+      sendWorkerMessage(child, { type: "shutdown" });
     });
   }
 
@@ -161,8 +168,7 @@ export class BotProcessProxy extends EventEmitter {
   resolveDispatchGate(id: string, result: { token?: string; waitedMs?: number; error?: string }) {
     const child = this.child;
     if (!child?.connected) return false;
-    child.send?.({ type: "dispatch-gate-response", id, ...result });
-    return true;
+    return sendWorkerMessage(child, { type: "dispatch-gate-response", id, ...result });
   }
   saveRoutePreset(name: string, routes: { cidade: string; bairro: string }[]) { return this.call("saveRoutePreset", name, routes); }
   deleteRoutePreset(id: string) { return this.call("deleteRoutePreset", id); }
@@ -188,6 +194,8 @@ export class BotProcessProxy extends EventEmitter {
       stdio: ["ignore", "inherit", "inherit", "ipc"]
     });
     this.child = child;
+    this.workerStartedAt = Date.now();
+    this.workerWasReady = false;
     this.readyPromise = new Promise<void>((resolve, reject) => {
       this.resolveReady = resolve;
       this.rejectReady = reject;
@@ -199,16 +207,25 @@ export class BotProcessProxy extends EventEmitter {
 
     child.on("message", (message: BotWorkerOutgoingMessage) => { if (this.child === child) this.handleMessage(message); });
     child.on("error", (error) => { if (this.child === child) this.handleExit(error); });
+    child.on("disconnect", () => { if (this.child === child) this.handleExit(new Error("Canal do worker desconectado.")); });
     child.on("exit", (code, signal) => {
       if (this.child !== child) return;
       this.handleExit(new Error(`Worker encerrou (${code ?? signal ?? "sem código"}).`));
     });
-    child.send?.({ type: "init", options: this.options });
+    this.startupTimer = setTimeout(() => {
+      if (this.child !== child) return;
+      this.handleExit(new Error("Worker não concluiu a inicialização em 30 segundos. Reiniciando automaticamente."));
+    }, STARTUP_TIMEOUT_MS);
+    this.startupTimer.unref?.();
+    sendWorkerMessage(child, { type: "init", options: this.options }, error => { if (this.child === child) this.handleExit(error); });
   }
 
   private handleMessage(message: BotWorkerOutgoingMessage) {
     if (!message || typeof message !== "object") return;
     if (message.type === "ready") {
+      this.workerWasReady = true;
+      if (this.startupTimer) clearTimeout(this.startupTimer);
+      this.startupTimer = undefined;
       this.updateSnapshot(message.snapshot);
       this.resolveReady?.();
       this.resolveReady = undefined;
@@ -288,7 +305,7 @@ export class BotProcessProxy extends EventEmitter {
       }, CALL_TIMEOUT_MS);
       timer.unref?.();
       this.pending.set(id, { resolve, reject, timer });
-      child.send?.({ type: "call", id, method, args }, (error) => {
+      sendWorkerMessage(child, { type: "call", id, method, args }, (error) => {
         if (!error) return;
         const pending = this.pending.get(id);
         if (!pending) return;
@@ -301,8 +318,13 @@ export class BotProcessProxy extends EventEmitter {
 
   private handleExit(error: Error) {
     if (this.intentionalShutdown || this.restartTimer) return;
+    if (this.startupTimer) clearTimeout(this.startupTimer);
+    this.startupTimer = undefined;
+    const failedChild = this.child;
     this.emit("worker-exit", error);
     this.child = undefined;
+    // An IPC error does not prove the process exited; don't leave an orphan.
+    if (failedChild && failedChild.exitCode === null && failedChild.signalCode === null) failedChild.kill("SIGKILL");
     this.restoring = false;
     this.recoveryIntent ??= {
       running: ["connected", "connecting", "waiting_qr", "reconnecting"].includes(this.snapshot.status),
@@ -312,10 +334,13 @@ export class BotProcessProxy extends EventEmitter {
       nuclearMode: this.snapshot.config.nuclearMode
     };
     this.restartCount += 1;
+    if (this.workerWasReady && Date.now() - this.workerStartedAt >= STARTUP_TIMEOUT_MS) this.consecutiveWorkerFailures = 0;
+    this.consecutiveWorkerFailures++;
+    const restartDelay = Math.min(30_000, RESTART_DELAY_MS * 2 ** Math.min(5, this.consecutiveWorkerFailures - 1));
     this.snapshot = {
       ...this.snapshot,
       status: "reconnecting",
-      error: "Processo isolado reiniciando automaticamente."
+      error: `Processo isolado reiniciando automaticamente: ${error.message}`
     };
     this.critical = false;
     this.rejectReady?.(error);
@@ -324,7 +349,7 @@ export class BotProcessProxy extends EventEmitter {
     this.restartTimer = setTimeout(() => {
       this.restartTimer = undefined;
       this.spawn();
-    }, RESTART_DELAY_MS);
+    }, restartDelay);
     this.restartTimer.unref?.();
   }
 

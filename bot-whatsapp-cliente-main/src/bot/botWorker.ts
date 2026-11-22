@@ -3,6 +3,7 @@ import { shutdownIsolatedOcrWorker } from "./ocrIsolated";
 import { compactPanelSnapshot } from "./panelSnapshot";
 import { BotWorkerIncomingMessage, BotWorkerOutgoingMessage } from "./botProcessProtocol";
 import os from "os";
+import { sendWorkerMessage } from "./workerIpc";
 
 const ALLOWED_METHODS = new Set([
   "getAnalysisPreview",
@@ -50,7 +51,9 @@ let snapshotTimer: NodeJS.Timeout | undefined;
 let shuttingDown = false;
 let reportedCritical = false;
 let callQueue = Promise.resolve();
+let stopQueue = Promise.resolve();
 let workerClientEmail = "";
+let commandGeneration = 0;
 let dispatchGateSequence = 0;
 const pendingDispatchGates = new Map<string, {
   resolve: (grant: { token: string; waitedMs: number }) => void;
@@ -74,7 +77,7 @@ function send(message: BotWorkerOutgoingMessage) {
   if ("snapshot" in message && message.snapshot) {
     message = { ...message, snapshot: compactPanelSnapshot(message.snapshot, workerClientEmail) };
   }
-  if (process.connected) process.send?.(message);
+  sendWorkerMessage(process, message);
 }
 
 function scheduleSnapshot() {
@@ -195,12 +198,26 @@ process.on("message", (message: BotWorkerIncomingMessage) => {
     return;
   }
   if (message.type === "call") {
+    if (shuttingDown) { send({ type: "response", id: message.id, error: "Worker encerrando. Tente novamente após reconectar." }); return; }
+    // Stopping must not wait behind a slow metadata request or startup call.
+    if (message.method === "disableMonitoring" || message.method === "stop") {
+      commandGeneration++;
+      stopQueue = stopQueue.then(() => handleCall(message)).catch(error => send({ type: "response", id: message.id, error: error instanceof Error ? error.message : String(error) }));
+      return;
+    }
     if (message.method === "getAnalysisPreview") {
       void handleCall(message).catch((error) => send({ type: "response", id: message.id, error: error instanceof Error ? error.message : String(error) }));
       return;
     }
+    const generation = commandGeneration;
     callQueue = callQueue
-      .then(() => handleCall(message))
+      .then(async () => {
+        // A new Conectar/Armar must wait until an urgent stop has flushed and
+        // closed the old socket; otherwise that stop could close the new one.
+        await stopQueue;
+        if (shuttingDown || generation !== commandGeneration) throw new Error("Comando cancelado porque o cliente parou o bot.");
+        return handleCall(message);
+      })
       .catch((error) => {
         send({
           type: "response",

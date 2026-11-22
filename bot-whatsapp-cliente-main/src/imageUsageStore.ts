@@ -6,6 +6,7 @@ type StoredImageUsage = {
   entries: ImageUsageEntry[];
   defaultAmounts: Record<string, number>;
   monthlyTotalOverrides: Record<string, number>;
+  monthlyTotalBaselines: Record<string, number>;
   billAllValidatedRoutes: Record<string, boolean>;
   routePrices: Record<string, number>;
   prepaidRoutes: Record<string, number>;
@@ -42,9 +43,17 @@ const MAX_ENTRIES = 50_000;
 
 export class ImageUsageStore {
   private data: StoredImageUsage;
+  private committedJson: string;
 
   constructor(private readonly filePath: string) {
     this.data = this.load();
+    // Legacy overrides did not record the balance against which they were set.
+    for (const key of Object.keys(this.data.monthlyTotalOverrides)) {
+      if (this.data.monthlyTotalBaselines[key] === undefined) {
+        this.data.monthlyTotalBaselines[key] = this.calculatedBalance(key.slice(8));
+      }
+    }
+    this.committedJson = JSON.stringify(this.data);
   }
 
   record(input: RecordAnalysisInput) {
@@ -220,10 +229,12 @@ export class ImageUsageStore {
       this.data.defaultAmounts[next] = this.data.defaultAmounts[previous];
       delete this.data.defaultAmounts[previous];
     }
-    for (const key of Object.keys(this.data.monthlyTotalOverrides)) {
-      if (!key.endsWith(`:${previous}`)) continue;
-      this.data.monthlyTotalOverrides[key.slice(0, -previous.length) + next] = this.data.monthlyTotalOverrides[key];
-      delete this.data.monthlyTotalOverrides[key];
+    for (const map of [this.data.monthlyTotalOverrides, this.data.monthlyTotalBaselines]) {
+      for (const key of Object.keys(map)) {
+        if (!key.endsWith(`:${previous}`)) continue;
+        map[key.slice(0, -previous.length) + next] = map[key];
+        delete map[key];
+      }
     }
     if (Object.prototype.hasOwnProperty.call(this.data.billAllValidatedRoutes, previous)) {
       this.data.billAllValidatedRoutes[next] = this.data.billAllValidatedRoutes[previous];
@@ -292,12 +303,18 @@ export class ImageUsageStore {
       ? { ...entry, paymentStatus: "paid", paidAt: now, updatedAt: now }
       : entry);
     this.data.lastPayments[email] = now;
+    for (const map of [this.data.monthlyTotalOverrides, this.data.monthlyTotalBaselines]) {
+      for (const key of Object.keys(map)) if (key.endsWith(`:${email}`)) delete map[key];
+    }
     this.save();
   }
 
   setMonthlyTotal(clientEmail: string, amountCents: number, month = this.currentMonth()) {
     const email = clientEmail.trim().toLowerCase();
-    this.data.monthlyTotalOverrides[this.monthlyTotalKey(email, month)] = this.normalizeAmount(amountCents);
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("Mês inválido para ajustar o saldo.");
+    const key = this.monthlyTotalKey(email, month);
+    this.data.monthlyTotalOverrides[key] = this.normalizeAmount(amountCents);
+    this.data.monthlyTotalBaselines[key] = this.calculatedBalance(email);
     this.save();
   }
 
@@ -330,7 +347,7 @@ export class ImageUsageStore {
     const unpaid = allEntries.filter((entry) => entry.decision === "billable" && (entry.paymentStatus || "unpaid") === "unpaid");
     const nextDue = this.nextDueDate(email, new Date());
     const daysUntilDue = Math.max(0, Math.ceil((nextDue.getTime() - Date.now()) / 86_400_000));
-    const amountCents = unpaid.reduce((total, entry) => total + entry.amountCents, 0);
+    const amountCents = this.payableBalance(email, month);
     const latestRoute = allEntries.filter((entry) => entry.decision === "billable" && entry.routeDispatchId)
       .sort((left, right) => Date.parse(right.reviewedAt || right.updatedAt) - Date.parse(left.reviewedAt || left.updatedAt))[0];
     const latestNoticeText = latestRoute
@@ -350,7 +367,7 @@ export class ImageUsageStore {
         ? unpaid.length >= this.paymentEveryRoutes(email)
           ? `${unpaid.length} rota(s) confirmadas desde o último pagamento. Ciclo de ${this.paymentEveryRoutes(email)} rotas: saldo atual ${(amountCents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}.`
           : undefined
-        : unpaid.length && daysUntilDue <= 3
+        : (unpaid.length || amountCents > 0) && daysUntilDue <= 3
           ? `Faltam ${daysUntilDue} dia(s) para o vencimento (${nextDue.toLocaleDateString("pt-BR")}). ${unpaid.length} rota(s) em aberto: ${(amountCents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}.`
           : undefined
     };
@@ -370,7 +387,7 @@ export class ImageUsageStore {
       billable: clientEntries.filter((entry) => entry.decision === "billable").length,
       excluded: clientEntries.filter((entry) => entry.decision === "excluded").length,
       detected: clientEntries.filter((entry) => entry.result === "detected").length,
-      amountCents: calculatedAmountCents,
+      amountCents: this.payableBalance(clientEmail, month, calculatedAmountCents),
       defaultAmountCents: this.routePrice(clientEmail),
       manualTotalAmountCents,
       billAllValidatedRoutes: true,
@@ -399,6 +416,20 @@ export class ImageUsageStore {
       })
       .filter((candidate) => candidate.sameIdentity || candidate.distanceMs <= 2 * 60 * 60_000)
       .sort((left, right) => Number(right.sameIdentity) - Number(left.sameIdentity) || left.distanceMs - right.distanceMs)[0]?.entry;
+  }
+
+  private calculatedBalance(email: string) {
+    return this.data.entries.filter(entry => entry.clientEmail === email && entry.decision === "billable" && (entry.paymentStatus || "unpaid") === "unpaid")
+      .reduce((total, entry) => total + entry.amountCents, 0);
+  }
+
+  private payableBalance(email: string, month: string, calculated = this.calculatedBalance(email)) {
+    const key = this.monthlyTotalKey(email, month);
+    const target = this.data.monthlyTotalOverrides[key];
+    const baseline = this.data.monthlyTotalBaselines[key];
+    // A manual correction adjusts the balance once; future routes still add
+    // their full configured price, and deleted unpaid routes subtract it.
+    return target === undefined ? calculated : Math.max(0, calculated + target - (baseline ?? calculated));
   }
 
   private defaultAmount(clientEmail: string) {
@@ -454,11 +485,12 @@ export class ImageUsageStore {
       if (!fs.existsSync(candidate)) continue;
       try {
         const parsed = JSON.parse(fs.readFileSync(candidate, "utf-8"));
-        if (parsed && Array.isArray(parsed.entries) && parsed.defaultAmounts && typeof parsed.defaultAmounts === "object") {
+        if (this.isValidStoredData(parsed)) {
           return {
             entries: parsed.entries,
             defaultAmounts: parsed.defaultAmounts,
             monthlyTotalOverrides: parsed.monthlyTotalOverrides && typeof parsed.monthlyTotalOverrides === "object" ? parsed.monthlyTotalOverrides : {},
+            monthlyTotalBaselines: parsed.monthlyTotalBaselines && typeof parsed.monthlyTotalBaselines === "object" ? parsed.monthlyTotalBaselines : {},
             billAllValidatedRoutes: parsed.billAllValidatedRoutes && typeof parsed.billAllValidatedRoutes === "object" ? parsed.billAllValidatedRoutes : {},
             routePrices: parsed.routePrices && typeof parsed.routePrices === "object" ? parsed.routePrices : {},
             prepaidRoutes: parsed.prepaidRoutes && typeof parsed.prepaidRoutes === "object" ? parsed.prepaidRoutes : {},
@@ -474,21 +506,36 @@ export class ImageUsageStore {
       }
     }
     if (fs.existsSync(this.filePath) || fs.existsSync(backupPath)) throw new Error("Registro de consumo inválido. Restaure um backup antes de gravar novos dados.");
-    return { entries: [], defaultAmounts: {}, monthlyTotalOverrides: {}, billAllValidatedRoutes: {}, routePrices: {}, prepaidRoutes: {}, dueDays: {}, paymentEveryRoutes: {}, lastPayments: {}, deletedRoutes: {}, creditBalances: {} };
+    return { entries: [], defaultAmounts: {}, monthlyTotalOverrides: {}, monthlyTotalBaselines: {}, billAllValidatedRoutes: {}, routePrices: {}, prepaidRoutes: {}, dueDays: {}, paymentEveryRoutes: {}, lastPayments: {}, deletedRoutes: {}, creditBalances: {} };
   }
 
   private save() {
-    if (this.hasValidData(this.filePath)) writeJsonAtomic(`${this.filePath}.bak`, JSON.parse(fs.readFileSync(this.filePath, "utf8")));
-    writeJsonAtomic(this.filePath, this.data);
+    try {
+      const committed = JSON.stringify(this.data);
+      if (this.hasValidData(this.filePath)) writeJsonAtomic(`${this.filePath}.bak`, JSON.parse(fs.readFileSync(this.filePath, "utf8")));
+      writeJsonAtomic(this.filePath, this.data);
+      this.committedJson = committed;
+    } catch (error) {
+      // A failed disk write cannot consume prepaid routes or acknowledge a
+      // payment only in memory. Retrying must start from the committed state.
+      this.data = JSON.parse(this.committedJson);
+      throw error;
+    }
   }
 
   private hasValidData(filePath: string) {
     if (!fs.existsSync(filePath)) return false;
     try {
       const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-      return Boolean(parsed && Array.isArray(parsed.entries));
+      return this.isValidStoredData(parsed);
     } catch {
       return false;
     }
+  }
+
+  private isValidStoredData(value: any) {
+    return Boolean(value && Array.isArray(value.entries) && value.defaultAmounts && typeof value.defaultAmounts === "object" && !Array.isArray(value.defaultAmounts)
+      && value.entries.every((entry: any) => entry && typeof entry.id === "string" && typeof entry.clientEmail === "string"
+        && typeof entry.createdAt === "string" && typeof entry.amountCents === "number" && Number.isFinite(entry.amountCents)));
   }
 }
