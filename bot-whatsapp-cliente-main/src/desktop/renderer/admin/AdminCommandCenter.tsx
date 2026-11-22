@@ -219,6 +219,7 @@ function openingSignalLabel(signal?: NonNullable<RouteDispatch["dispatchTimeline
   if (signal === "opening_message") return "Mensagem de abertura";
   if (signal === "already_open") return "Grupo já estava aberto";
   if (signal === "image_ready") return "Imagem pronta com grupo aberto";
+  if (signal === "metadata_check") return "Abertura confirmada pela checagem do grupo";
   if (signal === "manual") return "Comando manual do painel";
   if (signal === "simulation") return "Simulação";
   return "Não registrado";

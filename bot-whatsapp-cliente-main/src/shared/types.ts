@@ -167,7 +167,7 @@ export type RouteDispatchTimeline = {
   retryUsed: boolean;
   notAcceptableCount: number;
   mode: "normal" | "race";
-  openingSignal?: "group_update" | "opening_message" | "already_open" | "image_ready" | "manual" | "simulation";
+  openingSignal?: "group_update" | "opening_message" | "already_open" | "image_ready" | "metadata_check" | "manual" | "simulation";
   internalWarmState?: "cold" | "warming" | "ready";
   internalWarmAgeMs?: number;
   authBackend?: "sqlite" | "multi-file";

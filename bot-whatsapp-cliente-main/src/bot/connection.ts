@@ -170,6 +170,7 @@ export class BotService extends EventEmitter {
   private sock: any;
   private status: BotStatus = "disconnected";
   private groupState: BotGroupState = "unknown";
+  private groupStateRevision = 0;
   private qrCode = "";
   private qrGeneratedAt?: string;
   private qrExpiresAt?: string;
@@ -211,6 +212,8 @@ export class BotService extends EventEmitter {
   private preparedNuclearMode = false;
   private preparedTargetDispatchMode: BotConfig["targetDispatchMode"] = "manual";
   private pendingOcrMessages: string[] = [];
+  private pendingOcrDispatchTrigger: "manual" | "automatic" = "automatic";
+  private pendingOcrOpenCheckRunning = false;
   private pendingOcrReconnectDispatch?: {
     analysisId?: string;
     trigger: "manual" | "automatic";
@@ -622,6 +625,7 @@ export class BotService extends EventEmitter {
     if (signal === "opening_message") return "Mensagem de abertura";
     if (signal === "already_open") return "Grupo já estava aberto ao armar";
     if (signal === "image_ready") return "Imagem pronta com grupo aberto";
+    if (signal === "metadata_check") return "Abertura confirmada pela checagem do grupo";
     if (signal === "manual") return "Comando manual do painel";
     return "Simulação";
   }
@@ -2066,7 +2070,7 @@ export class BotService extends EventEmitter {
         (!interruptedCycleId || (this.acceptedMessageCountByCycle.get(interruptedCycleId) || 0) === 0)
       ) {
         this.deferOcrDispatchUntilReconnect(
-          this.activeSendTrigger === "manual" ? "manual" : "automatic",
+          this.activeSendTrigger === "manual" ? "manual" : this.activeSendTrigger === "automatic" ? "automatic" : this.pendingOcrDispatchTrigger,
           interruptedCycleId
         );
         if (interruptedCycleId && interruptedCycleId === this.sendCycleId) this.sendCycleId += 1;
@@ -2248,6 +2252,9 @@ export class BotService extends EventEmitter {
 
   private async captureInitialGroupState(): Promise<void> {
     try {
+      const revision = this.groupStateRevision;
+      const socket = this.sock;
+      const cycleId = this.sendCycleId;
       const config = this.configStore.load();
       const activeGroup = this.getActiveMonitoringGroup(config);
       if (!activeGroup.jid || !this.sock) return;
@@ -2260,6 +2267,9 @@ export class BotService extends EventEmitter {
         this.prewarmActiveChat(activeGroup.jid),
         this.prewarmGroupCrypto(metadata)
       ]);
+
+      if (socket !== this.sock || revision !== this.groupStateRevision || cycleId !== this.sendCycleId
+        || this.getActiveMonitoringGroup().jid !== activeGroup.jid) return;
 
       const isGroupClosed = metadata.announce === true;
       this.groupState = isGroupClosed ? "closed" : "open";
@@ -2290,6 +2300,10 @@ export class BotService extends EventEmitter {
     if (this.preparedTargetDispatchMode === "ocr" && !this.pendingOcrMessages.length) {
       this.logger.info(`Grupo já está aberto após ${reason}. O bot imagem enviará assim que uma rota segura estiver pronta.`);
       return false;
+    }
+
+    if (this.preparedTargetDispatchMode === "ocr") {
+      return this.dispatchPendingOcrOnOpening("already_open", Date.now());
     }
 
     if (this.activeSendCycle) return false;
@@ -2353,6 +2367,7 @@ export class BotService extends EventEmitter {
       if (!update?.id || update.id !== activeGroup.jid) continue;
 
       if (update.announce === true) {
+        this.groupStateRevision++;
         this.groupState = "closed";
         this.grupoJaFechouDepoisDoInicio = true;
         this.sendCycleId += 1;
@@ -2366,8 +2381,13 @@ export class BotService extends EventEmitter {
       }
 
       if (update.announce === false) {
+        this.groupStateRevision++;
         this.lastOpeningSignalAt = eventReceivedAt;
         this.groupState = "open";
+        if (this.monitoringMode === "target" && this.preparedTargetDispatchMode === "ocr" && this.pendingOcrMessages.length) {
+          this.dispatchPendingOcrOnOpening("group_update", eventReceivedAt);
+          return;
+        }
         if (!this.grupoJaFechouDepoisDoInicio) {
           this.logger.info(`⚠️ ${activeGroup.label} já estava aberto desde o início. Aguardando próximo ciclo de fechamento e reabertura...`);
           return;
@@ -2453,8 +2473,14 @@ export class BotService extends EventEmitter {
       const detectouAbertura = OPENING_TRIGGER_WORDS.some((palavra) => textoNormalizado.includes(palavra));
 
       if (detectouAbertura) {
+        this.groupStateRevision++;
         this.lastOpeningSignalAt = eventReceivedAt;
         this.groupState = "open";
+        if (this.monitoringMode === "target" && this.preparedTargetDispatchMode === "ocr" && this.pendingOcrMessages.length) {
+          this.dispatchPendingOcrOnOpening("opening_message", eventReceivedAt);
+          this.scheduleReactionProcessing(messages);
+          return;
+        }
         if (!this.grupoJaFechouDepoisDoInicio) {
           this.logger.info(
             "Palavra de abertura detectada, mas o grupo ainda não fechou após o bot iniciar. Nenhuma mensagem enviada."
@@ -2844,6 +2870,9 @@ export class BotService extends EventEmitter {
   }
 
   async confirmOcrRouteSelection(optionIds: string[]) {
+    if (!this.monitoringEnabled || this.monitoringMode !== "target" || this.preparedTargetDispatchMode !== "ocr") {
+      throw new Error("Ative o bot imagem antes de confirmar uma rota para envio.");
+    }
     const selection = this.ocrRouteSelection;
     if (selection.status !== "ready" || !selection.options.length) {
       throw new Error("Nenhuma análise de imagem aguardando confirmação.");
@@ -2886,9 +2915,26 @@ export class BotService extends EventEmitter {
     this.emitSnapshot();
   }
 
-  private async dispatchPreparedOcrIfGroupOpen(trigger: "manual" | "automatic") {
+  private dispatchPendingOcrOnOpening(openingSignal: OpeningSignal, eventDetectedAt: number) {
+    const dispatchState = () => this.ocrRouteSelection.dispatchState;
+    if (!this.monitoringEnabled || !this.pendingOcrMessages.length || dispatchState() === "sending" || dispatchState() === "sent") return false;
+    void this.dispatchPreparedOcrIfGroupOpen(this.pendingOcrDispatchTrigger, { openingSignal, eventDetectedAt })
+      .catch(error => {
+        this.logger.warning(`[IA] Não consegui iniciar a rota preparada na abertura: ${this.getErrorMessage(error)}`);
+      });
+    return dispatchState() === "sending";
+  }
+
+  private async dispatchPreparedOcrIfGroupOpen(trigger: "manual" | "automatic", context: { openingSignal?: OpeningSignal; eventDetectedAt?: number; refreshState?: boolean } = {}) {
     const activeGroup = this.getActiveMonitoringGroup();
     if (!activeGroup.jid || !this.pendingOcrMessages.length) return false;
+    if (this.ocrRouteSelection.dispatchState === "sending" && this.activeSendCycle) return false;
+    const analysisId = this.lastOcrInsight?.analysisId;
+    const socket = this.sock;
+    const connectionId = this.activeConnectionId;
+    const stillCurrent = () => this.monitoringEnabled && this.preparedTargetDispatchMode === "ocr"
+      && this.pendingOcrMessages.length > 0 && this.lastOcrInsight?.analysisId === analysisId
+      && this.getActiveMonitoringGroup().jid === activeGroup.jid;
 
     if (trigger === "automatic") {
       const violation = this.findOcrConditionViolation(this.lastOcrInsight?.analysisOptions || []);
@@ -2910,12 +2956,19 @@ export class BotService extends EventEmitter {
       }
     }
 
-    const analysisId = this.lastOcrInsight?.analysisId;
-    const previousDispatch = trigger === "automatic" && analysisId
+    const previousDispatch = analysisId
       ? this.routeStore.all().find((route) => route.ocr?.analysisId === analysisId && route.confirmedCount > 0)
       : undefined;
     if (previousDispatch) {
       this.pendingOcrReconnectDispatch = undefined;
+      this.ocrRouteSelection = {
+        ...this.ocrRouteSelection,
+        dispatchState: "sent",
+        dispatchCompletedAt: previousDispatch.updatedAt || new Date().toISOString(),
+        message: `${previousDispatch.confirmedCount} rota(s) já confirmada(s) pelo WhatsApp. Nenhuma mensagem será duplicada.`
+      };
+      this.rememberCurrentOcrAnalysis();
+      this.emitSnapshot();
       this.logger.info("[ROMANEIO] Esta imagem já teve mensagem aceita pelo WhatsApp. Recuperação duplicada cancelada.");
       return false;
     }
@@ -2926,20 +2979,28 @@ export class BotService extends EventEmitter {
     }
 
     let isOpen = this.groupState === "open";
-    if (!isOpen) {
+    if (!isOpen || context.refreshState) {
       try {
+        const revision = this.groupStateRevision;
         const metadata = await this.refreshGroupMetadata(activeGroup.jid);
-        if (metadata?.announce === false) {
+        if (!stillCurrent() || connectionId !== this.activeConnectionId || socket !== this.sock) return false;
+        if (revision !== this.groupStateRevision) {
+          isOpen = this.groupState === "open";
+        } else if (metadata?.announce === false) {
           this.groupState = "open";
           isOpen = true;
         } else if (metadata?.announce === true) {
           this.groupState = "closed";
+          this.grupoJaFechouDepoisDoInicio = true;
           isOpen = false;
         }
       } catch (error) {
         this.logger.warning(`[ROMANEIO] Não consegui atualizar o estado do grupo após a imagem: ${this.getErrorMessage(error)}. Usando estado em memória.`);
       }
     }
+
+    if (!stillCurrent() || connectionId !== this.activeConnectionId || socket !== this.sock) return false;
+    if (this.ocrRouteSelection.dispatchState === "sending" && this.activeSendCycle) return false;
 
     if (!isOpen) {
       if (this.pendingOcrReconnectDispatch) {
@@ -2956,7 +3017,7 @@ export class BotService extends EventEmitter {
     const cycleId = this.activeSendCycle ? this.sendCycleId : ++this.sendCycleId;
     const recoveryBeforeDispatch = this.pendingOcrReconnectDispatch;
     this.pendingOcrReconnectDispatch = undefined;
-    const dispatched = this.enviarMensagensRapidas(cycleId, trigger, Date.now(), "image_ready");
+    const dispatched = this.enviarMensagensRapidas(cycleId, trigger, context.eventDetectedAt ?? Date.now(), context.openingSignal || "image_ready");
     if (!dispatched) {
       if (!this.pendingOcrReconnectDispatch && recoveryBeforeDispatch) {
         this.pendingOcrReconnectDispatch = recoveryBeforeDispatch;
@@ -2965,7 +3026,7 @@ export class BotService extends EventEmitter {
       const activeCycle = this.activeSendCycle;
       if (activeCycle) {
         void activeCycle.then(() => {
-          if (this.groupState === "open" && this.monitoringEnabled) return this.dispatchPreparedOcrIfGroupOpen(trigger);
+          if (this.groupState === "open" && stillCurrent()) return this.dispatchPreparedOcrIfGroupOpen(trigger, context);
         }).catch((error) => this.logger.warning(`Não consegui retomar a rota preparada: ${this.getErrorMessage(error)}`));
       }
       return false;
@@ -2980,28 +3041,31 @@ export class BotService extends EventEmitter {
       dispatchGroupName: activeGroup.name || this.configStore.load().grupoAlvoNome || "grupo alvo",
       message: `Enviando agora: ${dispatchedMessages.join(" | ")}.`
     };
-    this.logger.info(trigger === "automatic"
-      ? "[ROMANEIO] Grupo já estava aberto: disparo da melhor rota iniciado imediatamente após a imagem."
-      : "[ROMANEIO] Grupo já estava aberto: disparo da rota confirmada iniciado imediatamente.");
+    this.logger.info(`[IA] Envio da rota preparada iniciado: ${this.openingSignalLabel(context.openingSignal || "image_ready")}.`);
     this.emitSnapshot();
     void dispatchCycle?.then(() => {
       if (dispatchedAnalysisId && this.ocrRouteSelection.analysisId !== dispatchedAnalysisId) return;
+      if (this.pendingOcrReconnectDispatch?.analysisId === dispatchedAnalysisId && this.pendingOcrReconnectDispatch) return;
+      if (this.ocrRouteSelection.dispatchState === "sent" || this.ocrRouteSelection.dispatchState === "failed") return;
       const route = dispatchedAnalysisId
         ? this.routeStore.all().find((item) => item.ocr?.analysisId === dispatchedAnalysisId)
         : undefined;
       const sent = Boolean(route?.confirmedCount && route.confirmedCount > 0);
+      const awaitingAck = !sent && route?.dispatchTimeline && !route.dispatchTimeline.finishedAt;
       this.ocrRouteSelection = {
         ...this.ocrRouteSelection,
-        dispatchState: sent ? "sent" : "failed",
-        dispatchCompletedAt: new Date().toISOString(),
+        dispatchState: sent ? "sent" : awaitingAck ? "sending" : "failed",
+        dispatchCompletedAt: awaitingAck ? undefined : new Date().toISOString(),
         message: sent
           ? `${route!.confirmedCount} rota(s) enviada(s) com sucesso: ${dispatchedMessages.join(" | ")}.`
-          : "O ciclo terminou sem confirmação do WhatsApp. Confira o histórico antes de tentar novamente."
+          : awaitingAck ? "As mensagens foram encaminhadas. Aguardando a confirmação final do WhatsApp."
+            : "O ciclo terminou sem confirmação do WhatsApp. Confira o histórico antes de tentar novamente."
       };
       this.rememberCurrentOcrAnalysis();
       this.emitSnapshot();
     }).catch((error) => {
       if (dispatchedAnalysisId && this.ocrRouteSelection.analysisId !== dispatchedAnalysisId) return;
+      if (this.pendingOcrReconnectDispatch?.analysisId === dispatchedAnalysisId && this.pendingOcrReconnectDispatch) return;
       this.ocrRouteSelection = {
         ...this.ocrRouteSelection,
         dispatchState: "failed",
@@ -3091,6 +3155,7 @@ export class BotService extends EventEmitter {
 
     const activeGroup = this.getActiveMonitoringGroup(config);
     this.pendingOcrMessages = messages;
+    this.pendingOcrDispatchTrigger = mode;
     this.preparedTargetJid = activeGroup.jid;
     this.preparedMessages = messages;
     if (activeGroup.jid) this.rebuildPreparedRelayMessages(activeGroup.jid, messages);
@@ -3840,6 +3905,18 @@ export class BotService extends EventEmitter {
     if (sentMessageIds?.length) patch.sentMessageIds = sentMessageIds;
     if (dispatchTimeline) patch.dispatchTimeline = dispatchTimeline;
     this.routeStore.update(routeId, patch);
+    if (finalizeQueue && previousRoute?.ocr?.analysisId && previousRoute.ocr.analysisId === this.ocrRouteSelection.analysisId
+      && this.pendingOcrReconnectDispatch?.analysisId !== previousRoute.ocr.analysisId) {
+      this.ocrRouteSelection = {
+        ...this.ocrRouteSelection,
+        dispatchState: confirmedCount > 0 ? "sent" : "failed",
+        dispatchCompletedAt: new Date().toISOString(),
+        message: confirmedCount > 0
+          ? `${confirmedCount}/${totalCount} rota(s) confirmada(s) pelo WhatsApp: ${previousRoute.messages.join(" | ")}.`
+          : "O WhatsApp não confirmou o envio da rota. Confira o histórico antes de tentar novamente."
+      };
+      this.rememberCurrentOcrAnalysis();
+    }
     if (finalizeQueue) this.markQueuedDispatchFinished(cycleId, confirmedCount, totalCount);
     if (finalizeQueue && confirmedCount > 0 && previousRoute?.mode === "target" && previousRoute.status === "sending") {
       void this.sendSelfNotification([
@@ -4651,6 +4728,20 @@ export class BotService extends EventEmitter {
     if (reason === "timer" && (this.processingImageIds.size > 0 || this.ocrRouteSelection.status === "analyzing")) {
       return false;
     }
+    // Fallback for a missing WhatsApp opening event. The event callbacks still
+    // send immediately; only an armed, confirmed, waiting image is rechecked.
+    if (reason === "timer" && this.monitoringEnabled && this.monitoringMode === "target"
+      && this.preparedTargetDispatchMode === "ocr" && this.pendingOcrMessages.length
+      && this.ocrRouteSelection.status === "confirmed" && this.ocrRouteSelection.dispatchState === "waiting") {
+      if (this.pendingOcrOpenCheckRunning) return false;
+      this.pendingOcrOpenCheckRunning = true;
+      try {
+        if (await this.dispatchPreparedOcrIfGroupOpen(this.pendingOcrDispatchTrigger, { openingSignal: "metadata_check", refreshState: true })) return true;
+      } catch (error) {
+        this.logger.warning(`[IA] Falha na checagem de abertura da rota pendente: ${this.getErrorMessage(error)}`);
+      } finally { this.pendingOcrOpenCheckRunning = false; }
+      if (!this.monitoringEnabled || this.status !== "connected" || !this.sock || this.activeSendCycle) return false;
+    }
     const nextInterval = this.getWarmKeepAliveIntervalMs(config);
     if (this.warmKeepAliveIntervalMs && nextInterval !== this.warmKeepAliveIntervalMs) {
       void this.startWarmKeepAlive(reason === "reconexão" ? "reconexão" : "armado");
@@ -5301,7 +5392,13 @@ export class BotService extends EventEmitter {
 
   private async refreshGroupMetadata(jid: string) {
     try {
-      const metadata = await this.sock.groupMetadata(jid);
+      const socket = this.sock;
+      const revision = this.groupStateRevision;
+      let metadata = await socket.groupMetadata(jid);
+      if (socket !== this.sock) return undefined;
+      if (metadata && jid === this.preparedTargetJid && revision !== this.groupStateRevision && this.groupState !== "unknown") {
+        metadata = { ...metadata, announce: this.groupState === "closed" };
+      }
       if (metadata) {
         this.groupMetadataCache.set(jid, metadata);
       }

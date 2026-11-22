@@ -361,7 +361,8 @@ test("grupo aberto troca a analise para sucesso somente apos confirmacao do envi
   bot.ocrRouteSelection = {
     status: "confirmed", analysisId, options: [], preparedMessages: ["Cliente F-30"], dispatchState: "waiting"
   };
-  bot.routeStore.all = () => [{ ocr: { analysisId }, confirmedCount: 1 }];
+  let acknowledged = false;
+  bot.routeStore.all = () => acknowledged ? [{ ocr: { analysisId }, confirmedCount: 1 }] : [];
   const sendCycle = deferred();
   bot.enviarMensagensRapidas = () => {
     bot.activeSendCycle = sendCycle.promise;
@@ -370,6 +371,7 @@ test("grupo aberto troca a analise para sucesso somente apos confirmacao do envi
 
   assert.equal(await bot.dispatchPreparedOcrIfGroupOpen("manual"), true);
   assert.equal(bot.ocrRouteSelection.dispatchState, "sending");
+  acknowledged = true;
   sendCycle.resolve();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(bot.ocrRouteSelection.dispatchState, "sent");
