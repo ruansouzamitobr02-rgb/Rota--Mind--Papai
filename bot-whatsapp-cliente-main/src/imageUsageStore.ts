@@ -22,6 +22,7 @@ type StoredImageUsage = {
   balanceAdjustments: Record<string, number>;
   financeEvents: FinanceEvent[];
   paymentBlocks: Record<string, boolean>;
+  dailyLateFeeCents?: number;
   noticeDismissals: Record<string, { key: string; day: string }>;
 };
 
@@ -380,8 +381,16 @@ export class ImageUsageStore {
 
   isPaymentBlocked(clientEmail: string) { return this.data.paymentBlocks[clientEmail.trim().toLowerCase()] === true; }
 
+  updateBillingSettings(dailyLateFeeCents: unknown, performedBy = "admin") {
+    if (typeof dailyLateFeeCents !== "number" || !Number.isSafeInteger(dailyLateFeeCents) || dailyLateFeeCents < 0 || dailyLateFeeCents > 100_000) throw new FinanceValidationError("Informe uma taxa entre R$ 0,00 e R$ 1.000,00 por dia.");
+    this.data.dailyLateFeeCents = dailyLateFeeCents;
+    this.addFinanceEvent("*", "rules", performedBy, { amountCents: dailyLateFeeCents });
+    this.save();
+  }
+
   dismissBillingNotice(clientEmail: string, key: string, now = new Date()) {
     const email = clientEmail.trim().toLowerCase();
+    if (this.isPaymentBlocked(email)) throw new FinanceValidationError("O bloqueio só será removido após a liberação pelo administrador.");
     const notice = this.clientSnapshot(email, this.currentMonth(), now).billingNotice;
     if (!notice || notice.key !== key) throw new FinanceValidationError("O aviso mudou. Atualize a situação antes de fechar.");
     if (!notice.dismissedToday) {
@@ -406,6 +415,7 @@ export class ImageUsageStore {
       ledgerEntries: this.data.entries.slice(0, 2_000),
       clients,
       financeEvents: this.data.financeEvents,
+      billingSettings: { dailyLateFeeCents: this.data.dailyLateFeeCents ?? DAILY_LATE_FEE_CENTS },
       totals: {
         total: entries.length,
         pending: entries.filter((entry) => entry.decision === "pending").length,
@@ -429,7 +439,7 @@ export class ImageUsageStore {
     const { daysUntilDue, daysOverdue } = deadline;
     const principalCents = this.payableBalance(email, month);
     const paymentEveryRoutes = this.paymentEveryRoutes(email);
-    const dailyLateFeeCents = this.data.dueDates[email] && paymentEveryRoutes === 0 ? DAILY_LATE_FEE_CENTS : 0;
+    const dailyLateFeeCents = this.data.dueDates[email] && paymentEveryRoutes === 0 ? this.data.dailyLateFeeCents ?? DAILY_LATE_FEE_CENTS : 0;
     const lateFeeCents = principalCents > 0 ? daysOverdue * dailyLateFeeCents : 0;
     const amountCents = principalCents + lateFeeCents;
     const overdue = amountCents > 0 && (paymentEveryRoutes > 0 ? unpaid.length >= paymentEveryRoutes : daysOverdue > 0);
@@ -602,6 +612,7 @@ export class ImageUsageStore {
             balanceAdjustments: parsed.balanceAdjustments && typeof parsed.balanceAdjustments === "object" ? parsed.balanceAdjustments : {},
             financeEvents: Array.isArray(parsed.financeEvents) ? parsed.financeEvents : [],
             paymentBlocks: parsed.paymentBlocks && typeof parsed.paymentBlocks === "object" ? parsed.paymentBlocks : {},
+            dailyLateFeeCents: Number.isSafeInteger(parsed.dailyLateFeeCents) && parsed.dailyLateFeeCents >= 0 && parsed.dailyLateFeeCents <= 100_000 ? parsed.dailyLateFeeCents : undefined,
             noticeDismissals: parsed.noticeDismissals && typeof parsed.noticeDismissals === "object" ? parsed.noticeDismissals : {}
           };
         }

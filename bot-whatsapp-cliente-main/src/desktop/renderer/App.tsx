@@ -3628,7 +3628,7 @@ function PanelApp() {
           <strong>{snapshot.monitoringMode === "test" ? testGroupLabel : groupLabel}</strong>
         </div>
       </section>
-      <ClientDebtNotice key={userEmail} accountEmail={userEmail} usage={snapshot.imageUsage} suppressed={Boolean(snapshot.monitoringEnabled || snapshot.status === "connected" && snapshot.performanceMetrics?.activeQueue > 0 || busy || !snapshot.imageUsage?.paymentBlocked && (automaticOcrAnalysisOpen || pendingClientIncident))} />
+      <ClientDebtNotice key={userEmail} accountEmail={userEmail} usage={snapshot.imageUsage} onReturnToAdmin={impersonatedBy ? handleReturnToAdminMode : undefined} suppressed={Boolean(snapshot.monitoringEnabled || snapshot.status === "connected" && snapshot.performanceMetrics?.activeQueue > 0 || busy || !snapshot.imageUsage?.paymentBlocked && (automaticOcrAnalysisOpen || pendingClientIncident))} />
       {snapshot.imageUsage?.billingReminder && !snapshot.imageUsage.overdue && !snapshot.monitoringEnabled ? (
         <section className="client-billing-reminder" role="status">
           <CircleDollarSign size={18} />

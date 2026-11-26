@@ -390,6 +390,7 @@ export type FinanceEvent = {
 };
 
 export type AdminImageUsageSnapshot = {
+  billingSettings?: { dailyLateFeeCents: number };
   month: string;
   entries: ImageUsageEntry[];
   ledgerEntries?: ImageUsageEntry[];

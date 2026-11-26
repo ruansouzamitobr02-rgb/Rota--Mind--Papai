@@ -1,11 +1,13 @@
 import { readJsonFile, writeJsonAtomic } from "./storageJson";
-import { hashPassword } from "./passwords";
+import { hashPassword, isPasswordHash, verifyPasswordSync } from "./passwords";
+import { PasswordVault } from "./passwordVault";
 import { validateEmail } from "./httpSafety";
 import { DispatchMatchupRule, LoginEvent, PanelUserRole } from "./shared/types";
 
 export type StoredPanelUser = {
   email: string;
   password: string;
+  passwordEncrypted?: string;
   role: PanelUserRole;
   blocked: boolean;
   color: string;
@@ -29,7 +31,23 @@ const MAX_LOGIN_HISTORY = 100;
 const MAX_USAGE_GAP_MS = 1000 * 60 * 5;
 
 export class PanelUserStore {
-  constructor(private readonly filePath: string) {}
+  private readonly vault: PasswordVault;
+  constructor(private readonly filePath: string) { this.vault = new PasswordVault(filePath); }
+
+  revealPassword(email: string) {
+    const user = this.load().find(item => item.email === email.trim().toLowerCase());
+    if (!user) return undefined;
+    const password = this.vault.open(user.passwordEncrypted, user.email);
+    return password !== undefined && verifyPasswordSync(password, user.password) ? password : undefined;
+  }
+
+  rememberPassword(email: string, password: string) {
+    if (!password || isPasswordHash(password)) return;
+    const users = this.load(), user = users.find(item => item.email === email.trim().toLowerCase());
+    if (!user || !verifyPasswordSync(password, user.password) || this.revealPassword(user.email) === password) return;
+    user.passwordEncrypted = this.vault.seal(password, user.email);
+    this.save(users);
+  }
 
   all() {
     return this.load();
@@ -59,7 +77,11 @@ export class PanelUserStore {
         || (input.blocked !== undefined && input.blocked !== existing.blocked)) {
         existing.sessionVersion = (existing.sessionVersion || 0) + 1;
       }
-      if (input.password !== undefined && input.password.trim()) existing.password = hashPassword(input.password);
+      if (input.password !== undefined && input.password.trim()) {
+        if (!isPasswordHash(input.password)) existing.passwordEncrypted = this.vault.seal(input.password, email);
+        else if (input.password !== existing.password) delete existing.passwordEncrypted;
+        existing.password = hashPassword(input.password);
+      }
       if (input.source) existing.source = input.source;
       if (input.role) existing.role = input.role;
       if (input.blocked !== undefined) existing.blocked = input.blocked;
@@ -78,6 +100,7 @@ export class PanelUserStore {
     const user: StoredPanelUser = {
       email,
       password: hashPassword(input.password),
+      passwordEncrypted: !isPasswordHash(input.password) ? this.vault.seal(input.password, email) : undefined,
       source: input.source || "panel",
       sessionVersion: 0,
       role: input.role || "client",
@@ -102,6 +125,8 @@ export class PanelUserStore {
     if (users.some((user) => user.email === normalized && user.email !== email)) throw new Error("Email já cadastrado.");
     const user = users.find((item) => item.email === email);
     if (!user) throw new Error("Usuário não encontrado.");
+    const password = this.vault.open(user.passwordEncrypted, user.email);
+    user.passwordEncrypted = password === undefined ? undefined : this.vault.seal(password, normalized);
     user.email = normalized;
     user.source = "panel";
     this.save(users);
@@ -182,7 +207,7 @@ export class PanelUserStore {
   }
 
   private save(users: StoredPanelUser[]) {
-    writeJsonAtomic(this.filePath, users.map((user) => ({ ...user, password: hashPassword(user.password) })));
+    writeJsonAtomic(this.filePath, users.map((user) => ({ ...user, passwordEncrypted: !isPasswordHash(user.password) ? this.vault.seal(user.password, user.email) : user.passwordEncrypted, password: hashPassword(user.password) })));
   }
 
   private normalize(input: any): StoredPanelUser | undefined {
@@ -191,6 +216,7 @@ export class PanelUserStore {
     return {
       email: input.email.trim().toLowerCase(),
       password: input.password,
+      passwordEncrypted: typeof input.passwordEncrypted === "string" ? input.passwordEncrypted : undefined,
       source: input.source === "panel" ? "panel" : "environment",
       sessionVersion: Number.isSafeInteger(input.sessionVersion) && input.sessionVersion >= 0 ? input.sessionVersion : 0,
       role: input.role === "admin" ? "admin" : "client",

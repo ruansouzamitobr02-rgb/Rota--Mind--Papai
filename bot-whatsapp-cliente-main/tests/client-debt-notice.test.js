@@ -99,6 +99,21 @@ test("HTTP: situação financeira é privada e quitação do administrador limpa
   };
   assert.equal((await request("/api/billing/status")).status, 401);
   const clientToken = await login(client), otherToken = await login(other), adminToken = await login(admin);
+  const revealPath = `/api/admin/users/${encodeURIComponent(client)}/password/reveal`;
+  assert.equal((await request(revealPath, undefined, "POST")).status, 401);
+  assert.equal((await request(revealPath, otherToken, "POST")).status, 403);
+  const revealed = await request(revealPath, adminToken, "POST");
+  assert.match(revealed.headers.get("cache-control"), /no-store/);
+  assert.deepEqual(await revealed.json(), { available: true, password: "test-password" });
+  const publicUsers = await (await request("/api/admin/users", adminToken)).text();
+  assert.ok(!publicUsers.includes("password") && !publicUsers.includes("scrypt$") && !publicUsers.includes("test-password"));
+  const settingsPath = "/api/admin/billing-settings";
+  const settings = (token, cents) => fetch(base + settingsPath, { method: "PATCH", headers: { "x-panel-token": token, "content-type": "application/json" }, body: JSON.stringify({ dailyLateFeeCents: cents }) });
+  assert.equal((await settings(clientToken, 75)).status, 403);
+  assert.equal((await settings(adminToken, -1)).status, 400);
+  const updatedSettings = await settings(adminToken, 75);
+  assert.equal(updatedSettings.status, 200);
+  assert.equal((await updatedSettings.json()).billingSettings.dailyLateFeeCents, 75);
   const status = await (await request(`/api/billing/status?email=${other}`, clientToken)).json();
   assert.equal(status.amountCents, 500); assert.equal(status.overdue, true);
   assert.equal((await (await request(`/api/billing/status?email=${client}`, otherToken)).json()).amountCents, 0);
@@ -112,6 +127,8 @@ test("HTTP: situação financeira é privada e quitação do administrador limpa
   assert.equal((await (await request("/api/billing/status", clientToken)).json()).billingNotice.dismissedToday, true);
   assert.equal((await dismiss(otherToken)).status, 409);
   assert.equal((await patch({ paymentBlocked: true })).status, 200);
+  assert.equal((await dismiss(clientToken)).status, 423);
+  assert.equal((await request("/api/romaneio/clear", clientToken, "POST")).status, 423);
   assert.equal((await request("/api/me", clientToken)).status, 200);
   for (const action of ["start", "restart", "start-monitoring", "start-image-monitoring", "start-nuclear-monitoring", "start-test-monitoring", "manual-dispatch", "simulate-opening"]) {
     assert.equal((await request(`/api/action/${action}`, clientToken, "POST")).status, 423, `bloqueio não protegeu ${action}`);

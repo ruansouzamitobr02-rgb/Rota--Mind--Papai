@@ -37,3 +37,4 @@ __pycache__/
 
 .env.*
 !.env.example
+.panel-password-key

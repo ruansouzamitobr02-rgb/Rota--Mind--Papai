@@ -1,4 +1,6 @@
 import { CostsPanel } from "./CostsPanel";
+import { UsersWorkspace } from "./UsersWorkspace";
+import { SupportWorkspace } from "./SupportWorkspace";
 import { mergeUsageAmounts, parseMoneyInput } from "./usageDrafts";
 import { getRouteDecisionStatus, isRouteDeleted, routeDeletedAt } from "../../../shared/routeLifecycle";
 import { CSSProperties, FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
@@ -396,17 +398,34 @@ function UserEditor({
   onSave: () => void;
   competitors: AdminUserSummary[];
 }) {
+  const [showPassword, setShowPassword] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
+  useEffect(() => {
+    formRef.current?.querySelector<HTMLInputElement>("input")?.focus();
+    const keys = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) onCancel();
+      if (event.key !== "Tab") return;
+      const elements = Array.from(formRef.current?.querySelectorAll<HTMLElement>("input:not(:disabled),select:not(:disabled),button:not(:disabled)") || []);
+      const first = elements[0], last = elements[elements.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    };
+    document.addEventListener("keydown", keys);
+    return () => document.removeEventListener("keydown", keys);
+  }, [busy]);
   return (
-    <form className="adminx-editor" onSubmit={(event) => { event.preventDefault(); onSave(); }}>
-      <input type="email" placeholder="Email" value={value.email} onChange={(event) => onChange({ ...value, email: event.target.value })} />
-      <input type="password" placeholder={value.originalEmail ? "Nova senha opcional" : "Senha"} value={value.password} onChange={(event) => onChange({ ...value, password: event.target.value })} />
-      <select value={value.role} onChange={(event) => onChange({ ...value, role: event.target.value === "admin" ? "admin" : "client" })}>
+    <form ref={formRef} className="adminx-editor" onSubmit={(event) => { event.preventDefault(); onSave(); }}>
+      <h3 className="user-editor-section">Acesso à conta</h3>
+      <label className="user-editor-field"><span>Email</span><input type="email" autoComplete="off" placeholder="Email" value={value.email} onChange={(event) => onChange({ ...value, email: event.target.value })} /></label>
+      <label className="user-editor-field"><span>{value.originalEmail ? "Nova senha · deixe em branco para manter" : "Senha de acesso"}</span><input type={showPassword ? "text" : "password"} autoComplete="new-password" placeholder={value.originalEmail ? "Nova senha opcional" : "Senha"} value={value.password} onChange={(event) => onChange({ ...value, password: event.target.value })} /></label>
+      <label className="adminx-check"><input type="checkbox" checked={showPassword} onChange={event => setShowPassword(event.target.checked)} />Mostrar senha digitada</label>
+      <label className="user-editor-field"><span>Tipo da conta</span><select value={value.role} onChange={(event) => onChange({ ...value, role: event.target.value === "admin" ? "admin" : "client" })}>
         <option value="client">Cliente</option>
         <option value="admin">Admin</option>
-      </select>
+      </select></label>
       <label className="adminx-check">
         <input type="checkbox" checked={value.blocked} onChange={(event) => onChange({ ...value, blocked: event.target.checked })} />
-        Bloqueado
+        Bloquear login da conta
       </label>
       <div className="adminx-field adminx-matchups">
         <span>Confrontos de prioridade</span>
@@ -432,8 +451,8 @@ function UserEditor({
         }}>Adicionar confronto</button>
         {!value.dispatchMatchups.length ? <small>Sem confrontos: este cliente não ganha nem perde prioridade para ninguém.</small> : null}
       </div>
-      <input type="color" value={value.color} onChange={(event) => onChange({ ...value, color: event.target.value })} />
-      <button className="button" type="button" onClick={onCancel}>Cancelar</button>
+      <label className="user-editor-field"><span>Cor de identificação</span><input type="color" value={value.color} onChange={(event) => onChange({ ...value, color: event.target.value })} /></label>
+      <button className="button" disabled={busy} type="button" onClick={onCancel}>Cancelar</button>
       <button className="button primary" disabled={busy || !value.email.trim() || (!value.originalEmail && !value.password.trim())} type="submit">
         Salvar
       </button>
@@ -1556,7 +1575,7 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
   ];
 
   return (
-    <main className={page === "costs" ? "adminx-shell adminx-costs-view" : "adminx-shell"}>
+    <main className={`adminx-shell ${page === "costs" ? "adminx-costs-view" : ""} ${["clients", "support", "logs", "history"].includes(page) ? "adminx-organized-view" : ""}`}>
       <aside className="adminx-sidebar">
         <div className="adminx-brand">
           <Bot size={24} />
@@ -1867,8 +1886,8 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
               <button className="button primary" type="button" onClick={() => setEditor(emptyEditor)}><UserPlus size={18} />Adicionar usuário</button>
               <button className="button" type="button" onClick={() => exportRoutes("csv")}><Download size={18} />Exportar rotas</button>
             </div>
-            {editor ? <UserEditor value={editor} busy={busy} competitors={safeAdminUsers} onChange={setEditor} onCancel={() => setEditor(undefined)} onSave={() => saveUser()} /> : null}
-            <ClientsTable users={safeAdminUsers} onOpen={openClient} onEdit={(user) => setEditor({ originalEmail: user.email, email: user.email, password: "", role: user.role, blocked: user.blocked, color: user.color, dispatchPriorityLevel: 0, dispatchBeatsEmail: user.dispatchBeatsEmail || "", dispatchAdvantageMs: user.dispatchAdvantageMs || 400, dispatchMatchups: user.dispatchMatchups || [] })} onToggleBlock={(user) => saveUser({ originalEmail: user.email, email: user.email, password: "", role: user.role, blocked: !user.blocked, color: user.color, dispatchPriorityLevel: 0, dispatchBeatsEmail: user.dispatchBeatsEmail || "", dispatchAdvantageMs: user.dispatchAdvantageMs || 400, dispatchMatchups: user.dispatchMatchups || [] })} />
+            {editor ? <div className="modal-backdrop user-editor-backdrop"><section className="user-editor-dialog" role="dialog" aria-modal="true" aria-label={editor.originalEmail ? "Editar usuário" : "Adicionar usuário"}><header><h2>{editor.originalEmail ? "Editar usuário" : "Adicionar usuário"}</h2><p>Acesso, identificação e prioridades da conta.</p></header><UserEditor value={editor} busy={busy} competitors={safeAdminUsers} onChange={setEditor} onCancel={() => setEditor(undefined)} onSave={() => saveUser()} /></section></div> : null}
+            <UsersWorkspace users={safeAdminUsers} usage={imageUsage} search={search} clientFilter={clientFilter} onCosts={(email) => { setClientFilter(email); setPage("costs"); }} onOpen={openClient} onEdit={(user) => setEditor({ originalEmail: user.email, email: user.email, password: "", role: user.role, blocked: user.blocked, color: user.color, dispatchPriorityLevel: 0, dispatchBeatsEmail: user.dispatchBeatsEmail || "", dispatchAdvantageMs: user.dispatchAdvantageMs || 400, dispatchMatchups: user.dispatchMatchups || [] })} onToggleBlock={(user) => { if (window.confirm(user.blocked ? `Liberar a conta ${user.email}?` : `Bloquear o login de ${user.email}? Para atraso financeiro, use Gerenciar custos.`)) void saveUser({ originalEmail: user.email, email: user.email, password: "", role: user.role, blocked: !user.blocked, color: user.color, dispatchPriorityLevel: 0, dispatchBeatsEmail: user.dispatchBeatsEmail || "", dispatchAdvantageMs: user.dispatchAdvantageMs || 400, dispatchMatchups: user.dispatchMatchups || [] }); }} />
           </section>
         ) : null}
 
@@ -2091,6 +2110,7 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
 
         {page === "history" ? (
           <section className="adminx-page">
+            <header className="finance-heading"><div><p>Consulta de rotas</p><h2>Histórico de envios</h2><span>Filtre por cliente, período, decisão e método de envio.</span></div></header>
             <RouteFilters decisionFilter={decisionFilter} modeFilter={modeFilter} onDecision={setDecisionFilter} onMode={setModeFilter} />
             <div className="adminx-metrics">
               <MetricCard Icon={ShieldCheck} tone="yellow" title="Motoristas" value={realValidationRoutes.length} detail="disparos importantes" />
@@ -2122,6 +2142,7 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
 
         {page === "logs" ? (
           <section className="adminx-page">
+            <header className="finance-heading"><div><p>Saúde do sistema</p><h2>Atividade dos clientes</h2><span>{visibleLogs.length} registro(s) nos filtros atuais. Use a busca para encontrar uma mensagem.</span></div></header>
             <div className="adminx-page-actions">
               <select value={logLevel} onChange={(event) => setLogLevel(event.target.value as LogLevelFilter)}>
                 <option value="all">Todos os níveis</option>
@@ -2132,13 +2153,13 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
               </select>
               <button className="button danger" type="button" onClick={() => cleanup("logs")}><Trash2 size={18} />{cleanupTarget === "logs" ? "Confirmar limpar logs" : "Limpar logs"}</button>
             </div>
-            <LogList logs={visibleLogs} full />
+            <article className="finance-detail workspace-log-detail"><LogList logs={visibleLogs} full />{!visibleLogs.length ? <p className="finance-empty">Nenhum registro nos filtros selecionados.</p> : null}</article>
           </section>
         ) : null}
 
         {page === "support" ? (
           <section className="adminx-page">
-            <SupportList messages={visibleSupport} onRead={readSupport} />
+            <SupportWorkspace messages={visibleSupport} search={search} onRead={readSupport} />
           </section>
         ) : null}
 
@@ -2534,59 +2555,6 @@ function RouteTable({
           {!routes.length ? (
             <tr><td colSpan={(readOnly ? 10 : 11) + (deletionView ? 3 : 0)}><p className="adminx-empty-text">Nenhuma rota encontrada.</p></td></tr>
           ) : null}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function ClientsTable({
-  users,
-  onOpen,
-  onEdit,
-  onToggleBlock
-}: {
-  users: AdminUserSummary[];
-  onOpen: (email: string) => void;
-  onEdit: (user: AdminUserSummary) => void;
-  onToggleBlock: (user: AdminUserSummary) => void;
-}) {
-  return (
-    <div className="adminx-table-wrap">
-      <table className="adminx-table">
-        <thead>
-          <tr>
-            <th>Usuário</th>
-            <th>Role</th>
-            <th>Painel</th>
-            <th>Bot</th>
-            <th>Monitoramento</th>
-            <th>Prioridade</th>
-            <th>Último visto</th>
-            <th>Uso</th>
-            <th>Ações</th>
-          </tr>
-        </thead>
-        <tbody>
-          {users.map((user) => (
-            <tr key={user.email} style={colorStyle(user.color)}>
-              <td data-label="Usuário"><span className="adminx-client-dot" />{user.email}</td>
-              <td data-label="Role">{user.role}</td>
-              <td data-label="Painel"><StatusPill tone={user.blocked ? "red" : user.presenceStatus === "online" ? "green" : user.presenceStatus === "recent" ? "yellow" : "muted"}>{user.blocked ? "bloqueado" : user.presenceStatus}</StatusPill></td>
-              <td data-label="Bot">{user.botStatus || "fechado"}</td>
-              <td data-label="Monitoramento">{user.monitoringEnabled ? <StatusPill tone="green">ativo</StatusPill> : <StatusPill tone="muted">parado</StatusPill>}</td>
-              <td data-label="Confronto">{user.dispatchMatchups?.length ? user.dispatchMatchups.map((rule) => `${rule.outcome === "wins" ? "Ganha de" : "Perde para"} ${rule.opponentEmail} · ${rule.delayMs}ms`).join(" | ") : "Sem confrontos"}</td>
-              <td data-label="Último visto">{formatShort(user.lastSeenAt)}</td>
-              <td data-label="Uso">{formatDuration(user.totalUsageMs)}</td>
-              <td data-label="Ações">
-                <div className="adminx-row-actions">
-                  <button className="button" type="button" onClick={() => onOpen(user.email)}>Detalhes</button>
-                  <button className="button" type="button" onClick={() => onEdit(user)}>Editar</button>
-                  <button className={user.blocked ? "button primary" : "button danger"} type="button" onClick={() => onToggleBlock(user)}>{user.blocked ? "Liberar" : "Bloquear"}</button>
-                </div>
-              </td>
-            </tr>
-          ))}
         </tbody>
       </table>
     </div>

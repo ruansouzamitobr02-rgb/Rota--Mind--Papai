@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, CalendarDays, CheckCircle2, ChevronRight, CircleDollarSign, History, Save, Search, SlidersHorizontal, Wallet } from "lucide-react";
 import { AdminImageUsageSnapshot, ClientFinanceSettings, ImageUsageClientSummary } from "../../../shared/types";
-import { registerClientPayment, saveClientFinance } from "../api";
+import { registerClientPayment, saveClientFinance, saveBillingSettings } from "../api";
 import { parseMoneyInput } from "./usageDrafts";
 import { getBillingDeadline, isBillingDate } from "../../../shared/billingDeadline";
 import { DAILY_LATE_FEE_CENTS } from "../../../shared/billingPolicy";
@@ -15,6 +15,7 @@ const status = (client: ImageUsageClientSummary) => client.paymentBlocked ? "Blo
 type Props = { usage: AdminImageUsageSnapshot; clientEmails: string[]; clientFilter: string; search: string; onChange: (next: AdminImageUsageSnapshot) => void };
 
 export function CostsPanel({ usage, clientEmails, clientFilter, search, onChange }: Props) {
+  const [section, setSection] = useState("accounts");
   const [selected, setSelected] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("Todos");
@@ -29,6 +30,8 @@ export function CostsPanel({ usage, clientEmails, clientFilter, search, onChange
   const total = all.reduce((sum, client) => sum + client.amountCents, 0);
   return <section className="finance-workspace">
     <header className="finance-heading"><div><p>Controle financeiro</p><h2>Contas dos clientes</h2><span>Saldo atual, vencimentos e pagamentos em um só lugar.</span></div><span className="finance-period">Saldo atual · todos os períodos</span></header>
+    <nav className="finance-tabs workspace-tabs" aria-label="Área financeira"><button type="button" aria-pressed={section === "accounts"} onClick={() => setSection("accounts")}><Wallet size={17} />Contas dos clientes</button><button type="button" aria-pressed={section === "settings"} onClick={() => setSection("settings")}><SlidersHorizontal size={17} />Configurações de cobrança</button></nav>
+    {section === "settings" ? <BillingSettings usage={usage} onChange={onChange} /> : <>
     <div className="finance-summary">
       <article><span className="finance-summary-icon"><Wallet size={22} /></span><div><small>Total a receber</small><strong>{money(total)}</strong></div></article>
       <article><span className="finance-summary-icon amber"><AlertTriangle size={22} /></span><div><small>Clientes em atraso</small><strong>{all.filter(client => client.overdue).length}</strong></div></article>
@@ -45,10 +48,27 @@ export function CostsPanel({ usage, clientEmails, clientFilter, search, onChange
       </aside>
       {current ? <ClientFinanceEditor key={current.clientEmail} client={current} usage={usage} onChange={onChange} /> : <article className="finance-detail finance-empty"><Wallet size={32} /><h3>Suas contas aparecem aqui</h3><p>Selecione um cliente para definir saldo e vencimento.</p></article>}
     </div>
+    </>}
   </section>;
 }
 
+function BillingSettings({ usage, onChange }: { usage: AdminImageUsageSnapshot; onChange: Props["onChange"] }) {
+  const cents = usage.billingSettings?.dailyLateFeeCents ?? DAILY_LATE_FEE_CENTS;
+  const [value, setValue] = useState(inputMoney(cents));
+  const dirty = useRef(false);
+  const [busy, setBusy] = useState(false), [error, setError] = useState(""), [saved, setSaved] = useState(false);
+  useEffect(() => { if (!dirty.current) setValue(inputMoney(cents)); }, [cents]);
+  async function save() {
+    setBusy(true); setError(""); setSaved(false);
+    try { const amount = parseMoneyInput(value); if (amount > 100_000) throw new Error("A taxa máxima é R$ 1.000,00 por dia."); const next = await saveBillingSettings(amount); dirty.current = false; onChange(next); setSaved(true); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Não foi possível salvar a taxa."); }
+    finally { setBusy(false); }
+  }
+  return <article className="finance-detail billing-settings"><header className="finance-detail-header"><div><p>Configuração geral</p><h3>Taxa por dia de atraso</h3></div><CalendarDays size={24} /></header><div className="finance-editor"><p>Vale para todos os clientes cobrados por data. Começa no dia seguinte ao vencimento e aparece separada do saldo.</p><div className="finance-fields"><label><span>Taxa diária (R$)</span><input aria-label="Taxa diária de atraso" inputMode="decimal" value={value} disabled={busy} onChange={event => { dirty.current = true; setValue(event.target.value); setSaved(false); }} /></label></div><p className="finance-help">Use 0,00 para desativar. Ao salvar, os saldos em atraso são recalculados com essa taxa para todos os dias de atraso. Pagamentos já registrados permanecem quitados.</p>{error ? <p role="alert" className="finance-feedback error">{error}</p> : null}{saved ? <p role="status" className="finance-feedback">Taxa atualizada para todos os clientes.</p> : null}<button type="button" className="button primary finance-save" disabled={busy} onClick={() => void save()}><Save size={17} />{busy ? "Salvando…" : "Salvar taxa diária"}</button></div></article>;
+}
+
 function ClientFinanceEditor({ client, usage, onChange }: { client: ImageUsageClientSummary; usage: AdminImageUsageSnapshot; onChange: Props["onChange"] }) {
+  const dailyLateFeeCents = usage.billingSettings?.dailyLateFeeCents ?? DAILY_LATE_FEE_CENTS;
   const [tab, setTab] = useState("balance");
   const [historyLimit, setHistoryLimit] = useState(50);
   const [busy, setBusy] = useState(false);
@@ -67,7 +87,7 @@ function ClientFinanceEditor({ client, usage, onChange }: { client: ImageUsageCl
     if (isBillingDate(form.dueDate)) {
       const principal = parseMoneyInput(form.balance);
       const days = getBillingDeadline(15, new Date(), undefined, undefined, form.dueDate).daysOverdue;
-      preview = { principal, fee: principal > 0 ? days * DAILY_LATE_FEE_CENTS : 0, days };
+      preview = { principal, fee: principal > 0 ? days * dailyLateFeeCents : 0, days };
     }
   } catch { /* The form reports invalid values when saving. */ }
   async function save(section: "balance" | "rules") {
@@ -136,7 +156,7 @@ function ClientFinanceEditor({ client, usage, onChange }: { client: ImageUsageCl
       <div className="finance-section-title"><CircleDollarSign size={20} /><div><h4>Quanto esse cliente precisa pagar?</h4><p>Edite o saldo total do cliente, sem alterar o preço de uma rota.</p></div></div>
       <div className="finance-fields"><label><span>Valor do cliente · sem taxa (R$)</span><input disabled={busy} aria-label="Saldo total do cliente" inputMode="decimal" value={form.balance} onChange={event => edit("balance", event.target.value)} /></label><label><span>Data de vencimento</span><input disabled={busy} aria-label="Data de vencimento do cliente" type="date" value={form.dueDate} onChange={event => edit("dueDate", event.target.value)} /></label></div>
       <p className="finance-help">Esse valor substitui o saldo atual. Novas rotas validadas continuam somando o preço configurado.</p>
-      <div className="finance-fee-policy"><AlertTriangle size={18} /><span><strong>{money(DAILY_LATE_FEE_CENTS)} por dia de atraso</strong><small>A partir do dia seguinte à data escolhida. A taxa é simples, separada do saldo e só existe enquanto houver valor em aberto.</small></span></div>
+      <div className="finance-fee-policy"><AlertTriangle size={18} /><span><strong>{money(dailyLateFeeCents)} por dia de atraso</strong><small>A partir do dia seguinte à data escolhida. Edite o valor em Configurações de cobrança.</small></span></div>
       {preview ? <div className="finance-preview" role="status"><small>Prévia com o valor e a data escolhidos</small><span>Saldo {money(preview.principal)} + taxa de {preview.days} dia(s): {money(preview.fee)}</span><strong>Total: {money(preview.principal + preview.fee)}</strong></div> : null}
       <button className="button primary finance-save" type="button" disabled={busy} onClick={() => void save("balance")}><Save size={17} />{busy ? "Salvando…" : "Salvar saldo e vencimento"}</button>
       <div className="finance-payment-section"><div><h4>Recebeu o pagamento?</h4><p>Confirme aqui depois de conferir o recebimento no seu banco.</p></div><button type="button" className="button" disabled={busy || client.amountCents <= 0} onClick={() => void pay()}><CheckCircle2 size={17} />Registrar pagamento</button></div>

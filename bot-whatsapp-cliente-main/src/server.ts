@@ -221,6 +221,7 @@ const revokedSessions = new Map<string, number>(readJsonFile<[string, number][]>
 const loginLimiter = new RequestRateLimiter(200, 5 * 60_000);
 const accountLoginLimiter = new RequestRateLimiter(20, 5 * 60_000);
 const supportLimiter = new RequestRateLimiter(5, 60_000);
+const passwordRevealLimiter = new RequestRateLimiter(40, 60_000);
 const lastPresenceWrite = new Map<string, number>();
 const keepAliveUrl =
   process.env.KEEP_ALIVE_URL ||
@@ -1490,6 +1491,7 @@ const server = http.createServer(async (request, response) => {
         source: expectedPassword.source || "environment"
       });
       panelUserStore.recordLogin(email, ip, userAgent);
+      panelUserStore.rememberPassword(email, password);
       syncPanelUser(panelUserStore.all().find((user) => user.email === email)!);
 
       sendJson(response, 200, {
@@ -1568,6 +1570,7 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === "POST" && url.pathname === "/api/billing/dismiss") {
+      if (imageUsageStore.isPaymentBlocked(authorizedEmail)) throw new HttpError(423, "O aviso de bloqueio permanece até a liberação pelo administrador.");
       const body = await readJsonBody(request);
       if (typeof body.key !== "string" || body.key.length > 300) throw new HttpError(400, "Aviso inválido.");
       try { sendJson(response, 200, imageUsageStore.dismissBillingNotice(authorizedEmail, body.key)); }
@@ -1948,6 +1951,32 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "PATCH" && url.pathname === "/api/admin/billing-settings") {
+      if (!requireAdmin(authorizedEmail, response)) return;
+      const body = await readJsonBody(request);
+      try { imageUsageStore.updateBillingSettings(body?.dailyLateFeeCents, authorizedEmail); }
+      catch (error) { if (error instanceof FinanceValidationError) throw new HttpError(400, error.message); throw error; }
+      broadcastAdminSnapshot();
+      for (const email of panelUsers.keys()) broadcastSnapshot(email);
+      sendJson(response, 200, imageUsageStore.snapshot());
+      return;
+    }
+
+    if (request.method === "POST" && /^\/api\/admin\/users\/[^/]+\/password\/reveal$/.test(url.pathname)) {
+      if (!requireAdmin(authorizedEmail, response)) return;
+      if (!passwordRevealLimiter.allow(authorizedEmail)) throw new HttpError(429, "Aguarde um minuto para consultar outra senha.");
+      const email = decodeURIComponent(url.pathname.split("/")[4]).trim().toLowerCase();
+      const user = panelUsers.get(email);
+      if (!user) throw new HttpError(404, "Usuário não encontrado.");
+      if (!panelUserStore.all().some(item => item.email === email)) panelUserStore.upsert({ email, password: user.password, role: user.role, blocked: user.blocked, source: user.source });
+      const configured = parsePanelUsers(process.env.PANEL_USERS, configuredAdminEmails).get(email);
+      if (configured) panelUserStore.rememberPassword(email, configured.password);
+      const password = panelUserStore.revealPassword(email);
+      console.log(`[AUDIT] Consulta de senha por ${authorizedEmail}: ${email}; disponível=${password !== undefined}.`);
+      sendJson(response, 200, password !== undefined ? { available: true, password } : { available: false, reason: "A senha antiga está apenas em hash. Defina uma nova senha em Editar ou aguarde o próximo login do cliente para habilitar a visualização." });
+      return;
+    }
+
     if (request.method === "PATCH" && url.pathname.startsWith("/api/admin/client-finance/")) {
       if (!requireAdmin(authorizedEmail, response)) return;
       const clientEmail = decodeURIComponent(url.pathname.replace("/api/admin/client-finance/", "")).trim().toLowerCase();
@@ -2195,6 +2224,7 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (url.pathname.startsWith("/api/romaneio/") && request.method !== "GET" && imageUsageStore.isPaymentBlocked(authorizedEmail)) throw new HttpError(423, "Uso do bot bloqueado por pagamento pendente.");
     const activeBot = authorizedEmail ? getBotForEmail(authorizedEmail) : undefined;
     const activeRomaneio = authorizedEmail ? getRomaneioStoreForEmail(authorizedEmail) : undefined;
 

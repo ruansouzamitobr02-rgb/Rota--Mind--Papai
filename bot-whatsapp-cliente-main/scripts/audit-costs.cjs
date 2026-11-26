@@ -22,6 +22,7 @@ const server = http.createServer(async (request, response) => {
   if (pathname === "/api/release") return json({ shouldShow: false });
   if (pathname === "/api/admin/monitor") return json(monitor());
   if (pathname === "/api/admin/events") { response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" }); streams.add(response); response.write(`data: ${JSON.stringify(monitor())}\n\n`); request.on("close", () => streams.delete(response)); return; }
+  if (pathname === "/api/admin/billing-settings") { let body = ""; for await (const chunk of request) body += chunk; store.updateBillingSettings(JSON.parse(body).dailyLateFeeCents, "admin@test.com"); json(store.snapshot()); broadcast(); return; }
   if (pathname.startsWith("/api/admin/client-finance/")) {
     let body = ""; for await (const chunk of request) body += chunk;
     store.updateClientFinance(decodeURIComponent(pathname.split("/").at(-1)), JSON.parse(body), "admin@test.com");
@@ -63,14 +64,14 @@ const deadline = setTimeout(() => { console.error("Costs audit timed out"); app.
   await js("document.querySelector('.finance-access-section button').click()"); await wait(150);
   assert.equal(store.isPaymentBlocked(email), false);
   console.log("PASS: saldo manual independente do preço, taxa de R$ 0,50/dia e bloqueio/desbloqueio em Custos.");
-  await js("document.querySelectorAll('.finance-tabs button')[1].click()"); await edit("Preço por rota", "6,50"); await js("document.querySelector('.finance-save').click()"); await wait(150);
+  await js("document.querySelectorAll('.finance-detail .finance-tabs button')[1].click()"); await edit("Preço por rota", "6,50"); await js("document.querySelector('.finance-save').click()"); await wait(150);
   assert.equal(store.snapshot().clients.find(c => c.clientEmail === email).routePriceCents, 650); assert.equal(store.clientSnapshot(email).principalCents, 8750);
-  await js("document.querySelectorAll('.finance-tabs button')[2].click()");
+  await js("document.querySelectorAll('.finance-detail .finance-tabs button')[2].click()");
   await until(window, "document.querySelector('.finance-history')?.textContent.includes('Saldo ajustado manualmente')", "auditoria não apareceu");
   fs.writeFileSync(path.resolve(__dirname, "../.audit-artifacts/costs-desktop.png"), (await window.webContents.capturePage()).toPNG());
   window.setSize(390, 844);
   await until(window, "innerWidth < 500", "viewport móvel não foi aplicado");
-  await js("document.querySelectorAll('.finance-tabs button')[0].click();document.querySelector('.finance-detail').scrollIntoView({behavior:'instant',block:'start'});");
+  await js("document.querySelectorAll('.finance-detail .finance-tabs button')[0].click();document.querySelector('.finance-detail').scrollIntoView({behavior:'instant',block:'start'});");
   await until(window, "document.querySelector('.finance-detail').getBoundingClientRect().top < 120", "editor não ficou acessível ao rolar a tela móvel");
   await wait(250);
   const bounds = await js("(()=>{const r=document.querySelector('.finance-detail').getBoundingClientRect();return {left:r.left,right:r.right,width:innerWidth}})()");
@@ -80,6 +81,13 @@ const deadline = setTimeout(() => { console.error("Costs audit timed out"); app.
   await js("window.confirm=()=>true;document.querySelector('.finance-payment-section button').click()"); await wait(150);
   assert.equal(store.clientSnapshot(email).amountCents, 0); assert.equal(store.snapshot().clients.find(c => c.clientEmail === email).configuredDueDate, null);
   assert.equal(store.isPaymentBlocked(email), false);
+  await js("document.querySelectorAll('.workspace-tabs button')[1].click()");
+  await edit("Taxa diária de atraso", "0,75");
+  await js("document.querySelector('.billing-settings .finance-save').click()");
+  await until(window, "document.querySelector('.billing-settings [role=status]')?.textContent.includes('atualizada')", "taxa não foi salva");
+  assert.equal(store.snapshot().billingSettings.dailyLateFeeCents, 75);
+  assert.equal(store.clientSnapshot(email).amountCents, 0, "taxa reviveu saldo quitado");
+  console.log("PASS: aba de configuração salva taxa diária e preserva contas quitadas.");
   console.log("PASS: abas de regras e histórico, layout móvel, pagamento quita saldo/taxa e inicia próximo período sem prazo antigo.");
   window.destroy(); for (const stream of streams) stream.end(); server.close(); clearTimeout(deadline); app.quit();
 })().catch(error => { console.error(error.stack || error); clearTimeout(deadline); app.exit(1); });

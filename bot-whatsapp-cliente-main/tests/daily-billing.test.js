@@ -3,6 +3,21 @@ const fs = require("node:fs"), os = require("node:os"), path = require("node:pat
 const { ImageUsageStore } = require("../dist/imageUsageStore");
 const { billingDayKey } = require("../dist/shared/billingPolicy");
 const email = "guilherme@billing.test";
+test("taxa configurável persiste, recalcula todos os clientes, aceita zero e não revive pagamentos", t => {
+  const { store, file } = setup(t);
+  const now = new Date("2026-11-28T12:00:00Z");
+  for (const client of [email, "other@billing.test"]) store.updateClientFinance(client, { balanceCents: 5000, dueDate: "2026-11-25" });
+  const at = client => store.clientSnapshot(client, "2026-11", now);
+  assert.equal(at(email).lateFeeCents, 150);
+  store.updateBillingSettings(75, "admin@billing.test");
+  assert.equal(at(email).lateFeeCents, 225); assert.equal(at("other@billing.test").lateFeeCents, 225);
+  assert.equal(new ImageUsageStore(file).clientSnapshot(email, "2026-11", now).dailyLateFeeCents, 75);
+  for (const invalid of [-1, 1.2, "50", null, 100001, NaN]) assert.throws(() => store.updateBillingSettings(invalid), /taxa/);
+  assert.equal(store.snapshot().billingSettings.dailyLateFeeCents, 75);
+  store.updateBillingSettings(0); assert.equal(at(email).lateFeeCents, 0);
+  store.registerPayment(email); store.updateBillingSettings(100);
+  assert.equal(at(email).amountCents, 0); assert.equal(at("other@billing.test").amountCents, 5300);
+});
 function setup(t) { const dir = fs.mkdtempSync(path.join(os.tmpdir(), "daily-billing-")); t.after(() => fs.rmSync(dir, { recursive: true, force: true })); const file = path.join(dir, "usage.json"); return { file, store: new ImageUsageStore(file) }; }
 
 test("avisa nos três dias anteriores e no vencimento sem taxa; fechar vale até amanhã", t => {
@@ -39,6 +54,7 @@ test("bloqueio financeiro persiste, permite desbloquear manualmente e some ao qu
   const restored = new ImageUsageStore(file);
   assert.equal(restored.isPaymentBlocked(email), true);
   assert.equal(restored.clientSnapshot(email).billingNotice.phase, "blocked");
+  assert.throws(() => restored.dismissBillingNotice(email, restored.clientSnapshot(email).billingNotice.key), /bloqueio/);
   restored.updateClientFinance(email, { paymentBlocked: false }, "admin");
   assert.equal(restored.isPaymentBlocked(email), false);
   restored.updateClientFinance(email, { paymentBlocked: true }, "admin");

@@ -47,6 +47,14 @@ export function getPanelPassword() {
   return window.localStorage.getItem("panelPassword") || "";
 }
 
+export function revealAdminUserPassword(email: string) {
+  return fetchJson<{ available: boolean; password?: string; reason?: string }>(`/api/admin/users/${encodeURIComponent(email)}/password/reveal`, { method: "POST" });
+}
+
+export function saveBillingSettings(dailyLateFeeCents: number) {
+  return fetchJson<AdminImageUsageSnapshot>("/api/admin/billing-settings", { method: "PATCH", body: JSON.stringify({ dailyLateFeeCents }) });
+}
+
 export function setPanelPassword(password: string) {
   if (password) {
     window.localStorage.setItem("panelPassword", password);
