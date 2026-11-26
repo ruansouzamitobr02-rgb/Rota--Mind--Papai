@@ -13,9 +13,9 @@
 
 ## Taxa e datas
 
-- Após a data escolhida, cada dia de calendário acrescenta **R$ 1,00** de taxa
+- Após a data escolhida, cada dia de calendário acrescenta **R$ 0,50** de taxa
   simples. O dia do vencimento inteiro permanece no prazo, no horário de São Paulo.
-- Exemplo: saldo combinado de R$ 50,00 e três dias de atraso resultam em R$ 53,00.
+- Exemplo: saldo combinado de R$ 50,00 e três dias de atraso resultam em R$ 51,50.
 - O cálculo não altera o saldo principal nem acumula taxa a cada consulta. A mesma
   data e o mesmo saldo produzem a mesma taxa, inclusive depois de reiniciar.
 - Sem saldo em aberto, não há taxa. Antecipar ou adiar a data recalcula o prazo.
@@ -40,11 +40,31 @@ preservam campos que o administrador está editando.
 
 ## Aviso do cliente
 
-O aviso mostra total, saldo combinado, taxa acumulada e a regra de R$ 1,00/dia.
-Pode ser fechado e reaparece em cinco minutos. O bot segue disponível; enquanto
-estiver armado ou aguardando confirmação de envio, o aviso e suas consultas
-periódicas ficam suspensos. A borda âmbar não intercepta cliques. O aviso some
-quando o administrador registra o pagamento recebido.
+Os alertas começam três dias antes do vencimento. Ao fechar, o aviso automático
+só reaparece no dia seguinte, no horário de São Paulo, inclusive após sair e
+entrar novamente ou usar outro dispositivo. O fechamento é salvo na conta;
+o navegador também guarda uma cópia para fechar imediatamente mesmo sem rede.
+"Ver aviso" permite consultar os dados de novo no mesmo dia.
+
+No vencimento, a tela informa que o pagamento é hoje e que, a partir do dia
+seguinte, o saldo sobe R$ 0,50 por dia. No dia e após o vencimento, exibe a chave
+Pix **91980984781**, favorecido **Ruan Souza da Silva**, com botão de copiar.
+O recebimento continua sendo conferido pelo administrador no banco.
+
+Durante monitoramento ou envio ativo, o aviso e suas consultas ficam suspensos.
+A borda âmbar não intercepta cliques. Registrar o pagamento retira o aviso.
+
+## Bloqueio por pagamento
+
+Em **Custos → cliente → Saldo e vencimento → Acesso ao bot**, use **Bloquear por
+atraso** ou **Desbloquear por pagamento**. O bloqueio é manual e só pode ser
+ativado para um cliente em atraso. O bloqueio para o bot ativo e impede comandos
+de operação/envio também no servidor; não basta chamar a API diretamente.
+
+O cliente continua podendo entrar no site, consultar o débito e copiar o Pix.
+Registrar a quitação remove automaticamente esse bloqueio financeiro; desbloquear
+manualmente também é possível, sem apagar a dívida. Isso não remove um bloqueio
+geral de conta aplicado na área de Clientes. Bloqueios e liberações são auditados.
 
 ## Implementação e testes
 

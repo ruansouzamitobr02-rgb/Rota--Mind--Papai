@@ -322,6 +322,10 @@ export function getClientBillingStatus(signal?: AbortSignal) {
   return fetchJson<ClientImageUsageSnapshot>("/api/billing/status", { signal });
 }
 
+export function dismissClientBillingNotice(key: string) {
+  return fetchJson<ClientImageUsageSnapshot>("/api/billing/dismiss", { method: "POST", keepalive: true, body: JSON.stringify({ key }) });
+}
+
 export function subscribeAdminMonitor(callback: (snapshot: AdminMonitorSnapshot) => void, onError?: (error?: unknown) => void) {
   const token = getPanelToken();
   if (!token) return () => undefined;

@@ -1,84 +1,87 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, Clock3, RefreshCw, X } from "lucide-react";
+import { AlertTriangle, CalendarDays, Clock3, Copy, RefreshCw, X } from "lucide-react";
 import { ClientImageUsageSnapshot } from "../../../shared/types";
-import { getClientBillingStatus } from "../api";
+import { BILLING_PIX_KEY, BILLING_PIX_RECEIVER, billingDayKey, DAILY_LATE_FEE_CENTS, paymentNoticePhase } from "../../../shared/billingPolicy";
+import { dismissClientBillingNotice, getClientBillingStatus } from "../api";
 
-const REMIND_AFTER_MS = 5 * 60_000;
 const money = (cents: number) => (cents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+type Dismissal = { key: string; day: string };
 
 export function ClientDebtNotice({ usage, suppressed, accountEmail }: {
   usage?: ClientImageUsageSnapshot; suppressed: boolean; accountEmail: string;
 }) {
+  const cacheKey = `billing-notice-dismissed:${accountEmail.trim().toLowerCase()}`;
   const [finance, setFinance] = useState(usage);
-  const [remindAt, setRemindAt] = useState(0);
+  const [dismissed, setDismissed] = useState<Dismissal | undefined>(() => {
+    try { return JSON.parse(localStorage.getItem(cacheKey) || "null") || undefined; } catch { return undefined; }
+  });
+  const [manualOpen, setManualOpen] = useState(false);
   const [clock, setClock] = useState(Date.now());
   const [checking, setChecking] = useState(false);
   const [feedback, setFeedback] = useState("");
   const refreshRef = useRef<() => Promise<void>>(async () => undefined);
   const usageVersion = useRef(0);
   const closeRef = useRef<HTMLButtonElement>(null);
-  const overdue = Boolean(finance?.overdue && finance.amountCents > 0);
-  const open = overdue && !suppressed && clock >= remindAt;
+  const phase = finance?.billingNotice?.phase || (finance && paymentNoticePhase(finance.amountCents, Boolean(finance.overdue), finance.daysUntilDue || 0, finance.paymentEveryRoutes ? undefined : finance.dueDate, finance.paymentBlocked));
+  const overdue = Boolean(finance?.overdue || finance?.paymentBlocked);
+  const noticeKey = finance?.billingNotice?.key || finance?.dueDate || "payment";
+  const day = finance?.billingNotice?.day || billingDayKey(new Date(clock));
+  const hiddenToday = finance?.billingNotice?.dismissedToday || dismissed?.key === noticeKey && dismissed?.day === day;
+  const open = Boolean(phase && !suppressed && (!hiddenToday || manualOpen));
+  const dueDate = finance?.dueDate ? new Date(finance.dueDate).toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" }) : "o prazo combinado";
+  const title = phase === "blocked" ? "Bot bloqueado por pagamento pendente" : phase === "due_today" ? "Hoje é o dia do pagamento" : phase === "upcoming" ? `Seu pagamento vence em ${finance?.daysUntilDue} dia(s)` : "Seu pagamento está em atraso";
 
   useEffect(() => { usageVersion.current++; setFinance(usage); setFeedback(""); }, [usage]);
 
   useEffect(() => {
-    // Never add a billing request or timer to the armed bot's critical path.
     if (suppressed || window.botApi) { setChecking(false); return; }
     let alive = true;
     let inFlight: AbortController | undefined;
-    const refresh = async () => {
+    const refresh = async (manual = false) => {
       if (!alive || inFlight || document.visibilityState === "hidden") return;
-      const controller = new AbortController();
-      const version = usageVersion.current;
+      const controller = new AbortController(), version = usageVersion.current;
       inFlight = controller;
       const deadline = window.setTimeout(() => controller.abort(), 10_000);
       setChecking(true);
       try {
         const next = await getClientBillingStatus(controller.signal);
         if (!alive || controller.signal.aborted || version !== usageVersion.current) return;
-        setFinance(next);
-        setFeedback(next.overdue ? "O pagamento ainda não foi registrado. Se já pagou, fale com o administrador." : "Situação atualizada.");
+        usageVersion.current++; setFinance(next); setClock(Date.now());
+        if (manual) setFeedback(next.amountCents > 0 ? "O pagamento ainda não foi registrado. Se já pagou, fale com o administrador." : "Situação atualizada.");
       } catch {
-        if (alive && !controller.signal.aborted) setFeedback("Não foi possível conferir agora. Tente novamente em instantes.");
+        if (alive && !controller.signal.aborted && manual) setFeedback("Não foi possível conferir agora. Tente novamente em instantes.");
       } finally {
         window.clearTimeout(deadline);
         if (inFlight === controller) inFlight = undefined;
         if (alive) setChecking(false);
       }
     };
-    refreshRef.current = refresh;
+    refreshRef.current = () => refresh(true);
     const resume = () => { if (document.visibilityState !== "hidden") { setClock(Date.now()); void refresh(); } };
     const timer = window.setInterval(() => { void refresh(); }, 60_000);
-    document.addEventListener("visibilitychange", resume);
-    window.addEventListener("online", resume);
+    document.addEventListener("visibilitychange", resume); window.addEventListener("online", resume);
     void refresh();
     return () => {
-      alive = false;
-      inFlight?.abort();
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", resume);
-      window.removeEventListener("online", resume);
+      alive = false; inFlight?.abort(); window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", resume); window.removeEventListener("online", resume);
       refreshRef.current = async () => undefined;
     };
   }, [suppressed, accountEmail]);
 
-  useEffect(() => {
-    if (suppressed) return;
-    setClock(Date.now());
-    const delay = remindAt - Date.now();
-    if (delay <= 0) return;
-    const timer = window.setTimeout(() => setClock(Date.now()), delay + 20);
-    return () => window.clearTimeout(timer);
-  }, [remindAt, suppressed]);
-
-  const dismiss = () => { setRemindAt(Date.now() + REMIND_AFTER_MS); setFeedback(""); };
+  const dismiss = () => {
+    const next = { key: noticeKey, day }, version = usageVersion.current;
+    setDismissed(next); setManualOpen(false); setFeedback("");
+    try { localStorage.setItem(cacheKey, JSON.stringify(next)); } catch { /* The server also persists the dismissal. */ }
+    if (finance?.billingNotice) void dismissClientBillingNotice(noticeKey).then(next => {
+      if (version === usageVersion.current) { usageVersion.current++; setFinance(next); }
+    }).catch(() => undefined);
+  };
+  useEffect(() => { setManualOpen(false); }, [noticeKey, Boolean(phase)]);
   useEffect(() => {
     if (!open) return;
-    const previousFocus = document.activeElement as HTMLElement | null;
-    closeRef.current?.focus({ preventScroll: true });
-    const closeElement = closeRef.current;
-    const escape = (event: KeyboardEvent) => {
+    const previousFocus = document.activeElement as HTMLElement | null, closeElement = closeRef.current;
+    closeElement?.focus({ preventScroll: true });
+    const keys = (event: KeyboardEvent) => {
       if (event.key === "Escape") dismiss();
       if (event.key !== "Tab") return;
       const buttons = Array.from(closeElement?.closest("[role=dialog]")?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") || []);
@@ -86,34 +89,38 @@ export function ClientDebtNotice({ usage, suppressed, accountEmail }: {
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
     };
-    document.addEventListener("keydown", escape);
+    document.addEventListener("keydown", keys);
     return () => {
-      document.removeEventListener("keydown", escape);
+      document.removeEventListener("keydown", keys);
       if (previousFocus?.isConnected && (document.activeElement === closeElement || document.activeElement === document.body)) previousFocus.focus({ preventScroll: true });
     };
-  }, [open]);
+  }, [open, noticeKey, day]);
 
-  if (!overdue) return null;
+  async function copyPix() {
+    try { await navigator.clipboard.writeText(BILLING_PIX_KEY); setFeedback("Chave Pix copiada."); }
+    catch { setFeedback("Selecione a chave Pix exibida e copie para o aplicativo do seu banco."); }
+  }
+
+  if (!phase) return null;
   return <>
-    <div className="client-debt-frame" aria-hidden="true" />
-    {!suppressed ? <section className="client-debt-banner" aria-label="Pagamento pendente">
-      <AlertTriangle size={18} /><span><strong>Pagamento pendente</strong><small>{money(finance!.amountCents)} em aberto</small></span>
-      <button type="button" className="button" onClick={() => { setRemindAt(0); setClock(Date.now()); }}>Ver aviso</button>
+    {overdue ? <div className="client-debt-frame" aria-hidden="true" /> : null}
+    {!suppressed ? <section className={`client-debt-banner ${phase}`} aria-label="Aviso de pagamento">
+      <CalendarDays size={18} /><span><strong>{phase === "upcoming" ? "Pagamento próximo" : phase === "due_today" ? "Pagamento vence hoje" : phase === "blocked" ? "Bot bloqueado por atraso" : "Pagamento pendente"}</strong><small>{money(finance!.amountCents)} · {dueDate}</small></span>
+      <button type="button" className="button" onClick={() => setManualOpen(true)}>Ver aviso</button>
     </section> : null}
     {open ? <div className="modal-backdrop client-debt-backdrop">
       <section className="client-debt-dialog" role="dialog" aria-modal="true" aria-labelledby="client-debt-title" aria-describedby="client-debt-description">
         <button ref={closeRef} className="icon-button client-debt-close" type="button" aria-label="Fechar aviso de pagamento" onClick={dismiss}><X size={20} /></button>
-        <div className="client-debt-icon"><AlertTriangle size={30} /></div>
+        <div className="client-debt-icon">{overdue ? <AlertTriangle size={30} /> : <CalendarDays size={30} />}</div>
         <p className="client-debt-eyebrow">Um lembrete sobre seu acerto</p>
-        <h2 id="client-debt-title">Você tem um pagamento pendente</h2>
-        <div className="client-debt-amount"><small>Seu saldo em aberto</small><strong>{money(finance!.amountCents)}</strong></div>
-        {finance!.dailyLateFeeCents ? <div className="client-debt-breakdown"><span>Saldo combinado <b>{money(finance!.principalCents || 0)}</b></span><span>Taxa de atraso · {finance!.daysOverdue || 0} dia(s) <b>{money(finance!.lateFeeCents || 0)}</b></span><small>Após o vencimento: R$ 1,00 de taxa por dia enquanto houver saldo em aberto.</small></div> : null}
-        <p id="client-debt-description">{finance!.paymentEveryRoutes
-          ? `Seu ciclo de ${finance!.paymentEveryRoutes} rotas foi atingido.`
-          : `O pagamento venceu em ${new Date(finance!.dueDate!).toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" })}.`}
-          {" "}Combine o acerto com o administrador para regularizar seu saldo.</p>
-        <div className="client-debt-note"><Clock3 size={17} /><span>Você pode continuar usando o bot. Este lembrete não aparece enquanto ele estiver armado.</span></div>
-        <button className="button client-debt-later" type="button" onClick={dismiss}>Agora não · lembrar em 5 minutos</button>
+        <h2 id="client-debt-title">{title}</h2>
+        <div className="client-debt-amount"><small>{phase === "upcoming" ? "Valor para o vencimento" : "Seu saldo em aberto"}</small><strong>{money(finance!.amountCents)}</strong></div>
+        {finance!.dailyLateFeeCents && (finance!.lateFeeCents || 0) > 0 ? <div className="client-debt-breakdown"><span>Saldo combinado <b>{money(finance!.principalCents || 0)}</b></span><span>Taxa de atraso · {finance!.daysOverdue || 0} dia(s) <b>{money(finance!.lateFeeCents || 0)}</b></span></div> : null}
+        <p id="client-debt-description">{phase === "upcoming" ? `Seu pagamento está previsto para ${dueDate}. Organize seu acerto; ao fechar, o próximo alerta será amanhã.` : phase === "due_today" ? `Seu pagamento vence hoje (${dueDate}).` : phase === "blocked" ? "O administrador bloqueou o uso do bot por uma pendência financeira. Consulte o saldo e combine a regularização." : finance!.paymentEveryRoutes ? `Seu ciclo de ${finance!.paymentEveryRoutes} rotas foi atingido.` : `O pagamento venceu em ${dueDate}.`}</p>
+        {finance!.dailyLateFeeCents ? <p className="client-debt-fee-warning">{phase === "due_today" ? "Pague hoje para evitar a taxa. A partir de amanhã, " : phase === "upcoming" ? "Após o vencimento, " : "Enquanto houver saldo em atraso, "}{money(DAILY_LATE_FEE_CENTS)} será acrescentado por dia de atraso.</p> : null}
+        {phase !== "upcoming" ? <div className="client-debt-pix"><small>Pague pelo Pix</small><strong>{BILLING_PIX_KEY}</strong><span>{BILLING_PIX_RECEIVER}</span><button className="button" type="button" onClick={() => void copyPix()}><Copy size={16} />Copiar chave Pix</button></div> : null}
+        <div className="client-debt-note"><Clock3 size={17} /><span>{finance!.paymentBlocked ? "O administrador bloqueou o uso do bot por este débito. Após conferir e registrar o pagamento, o acesso será liberado." : "Este lembrete não aparece enquanto o bot estiver armado. Ao fechar, o próximo alerta automático será amanhã."}</span></div>
+        <button className="button client-debt-later" type="button" onClick={dismiss}>Fechar · lembrar amanhã</button>
         <button className="button client-debt-refresh" type="button" disabled={checking} onClick={() => void refreshRef.current()}><RefreshCw size={16} className={checking ? "spin" : ""} />{checking ? "Conferindo…" : "Já pagou? Atualizar situação"}</button>
         <small className="client-debt-confirmation">O aviso some quando o administrador registra o pagamento.</small>
         {feedback ? <p className="client-debt-feedback" role="status">{feedback}</p> : null}

@@ -4,6 +4,7 @@ import { AdminImageUsageSnapshot, ClientImageUsageSnapshot, ClientFinanceSetting
 import { randomUUID } from "crypto";
 import { isRouteDeleted, routeDeletedAt } from "./shared/routeLifecycle";
 import { getBillingDeadline, isBillingDate } from "./shared/billingDeadline";
+import { billingDayKey, DAILY_LATE_FEE_CENTS, paymentNoticePhase } from "./shared/billingPolicy";
 type StoredImageUsage = {
   entries: ImageUsageEntry[];
   defaultAmounts: Record<string, number>;
@@ -20,6 +21,8 @@ type StoredImageUsage = {
   dueDates: Record<string, string | null>;
   balanceAdjustments: Record<string, number>;
   financeEvents: FinanceEvent[];
+  paymentBlocks: Record<string, boolean>;
+  noticeDismissals: Record<string, { key: string; day: string }>;
 };
 
 type RecordAnalysisInput = {
@@ -253,7 +256,7 @@ export class ImageUsageStore {
       }
     }
     this.data.financeEvents = this.data.financeEvents.map(event => event.clientEmail === previous ? { ...event, clientEmail: next } : event);
-    for (const map of [this.data.routePrices, this.data.prepaidRoutes, this.data.creditBalances, this.data.dueDays, this.data.paymentEveryRoutes, this.data.lastPayments, this.data.dueDates, this.data.balanceAdjustments]) {
+    for (const map of [this.data.routePrices, this.data.prepaidRoutes, this.data.creditBalances, this.data.dueDays, this.data.paymentEveryRoutes, this.data.lastPayments, this.data.dueDates, this.data.balanceAdjustments, this.data.paymentBlocks, this.data.noticeDismissals]) {
       if (Object.prototype.hasOwnProperty.call(map, previous)) {
         map[next] = map[previous];
         delete map[previous];
@@ -312,6 +315,8 @@ export class ImageUsageStore {
       : entry);
     this.data.lastPayments[email] = now;
     delete this.data.balanceAdjustments[email];
+    delete this.data.paymentBlocks[email];
+    delete this.data.noticeDismissals[email];
     if (Object.prototype.hasOwnProperty.call(this.data.dueDates, email)) this.data.dueDates[email] = null;
     if (paidAmount > 0) this.addFinanceEvent(email, "payment", performedBy, { amountCents: paidAmount });
     for (const map of [this.data.monthlyTotalOverrides, this.data.monthlyTotalBaselines]) {
@@ -333,6 +338,8 @@ export class ImageUsageStore {
   updateClientFinance(clientEmail: string, settings: ClientFinanceSettings, performedBy = "admin") {
     const email = clientEmail.trim().toLowerCase();
     if (!settings || typeof settings !== "object" || Array.isArray(settings)) throw new FinanceValidationError("Configuração financeira inválida.");
+    if (settings.paymentBlocked !== undefined && typeof settings.paymentBlocked !== "boolean") throw new FinanceValidationError("Bloqueio de pagamento inválido.");
+    if (settings.paymentBlocked === true && !this.clientSnapshot(email).overdue) throw new FinanceValidationError("O bloqueio por pagamento está disponível para clientes em atraso.");
     const ranges: [keyof ClientFinanceSettings, number, number][] = [["balanceCents", 0, 10_000_000], ["routePriceCents", 0, 10_000_000],
       ["prepaidRoutesRemaining", 0, 10_000], ["addPrepaidRoutes", 1, 10_000], ["paymentEveryRoutes", 0, 10_000], ["dueDay", 1, 31]];
     for (const [key, min, max] of ranges) {
@@ -364,7 +371,24 @@ export class ImageUsageStore {
       if (settings.paymentEveryRoutes > 0) this.data.dueDates[email] = null;
     }
     if (ranges.slice(1).some(([key]) => settings[key] !== undefined)) this.addFinanceEvent(email, "rules", performedBy);
+    if (settings.paymentBlocked !== undefined && settings.paymentBlocked !== this.isPaymentBlocked(email)) {
+      this.data.paymentBlocks[email] = settings.paymentBlocked;
+      this.addFinanceEvent(email, settings.paymentBlocked ? "blocked" : "unblocked", performedBy);
+    }
     this.save();
+  }
+
+  isPaymentBlocked(clientEmail: string) { return this.data.paymentBlocks[clientEmail.trim().toLowerCase()] === true; }
+
+  dismissBillingNotice(clientEmail: string, key: string, now = new Date()) {
+    const email = clientEmail.trim().toLowerCase();
+    const notice = this.clientSnapshot(email, this.currentMonth(), now).billingNotice;
+    if (!notice || notice.key !== key) throw new FinanceValidationError("O aviso mudou. Atualize a situação antes de fechar.");
+    if (!notice.dismissedToday) {
+      this.data.noticeDismissals[email] = { key, day: notice.day };
+      this.save();
+    }
+    return this.clientSnapshot(email, this.currentMonth(), now);
   }
 
   private addFinanceEvent(clientEmail: string, type: FinanceEvent["type"], performedBy: string, details: Partial<FinanceEvent> = {}) {
@@ -405,10 +429,15 @@ export class ImageUsageStore {
     const { daysUntilDue, daysOverdue } = deadline;
     const principalCents = this.payableBalance(email, month);
     const paymentEveryRoutes = this.paymentEveryRoutes(email);
-    const dailyLateFeeCents = this.data.dueDates[email] && paymentEveryRoutes === 0 ? 100 : 0;
+    const dailyLateFeeCents = this.data.dueDates[email] && paymentEveryRoutes === 0 ? DAILY_LATE_FEE_CENTS : 0;
     const lateFeeCents = principalCents > 0 ? daysOverdue * dailyLateFeeCents : 0;
     const amountCents = principalCents + lateFeeCents;
     const overdue = amountCents > 0 && (paymentEveryRoutes > 0 ? unpaid.length >= paymentEveryRoutes : daysOverdue > 0);
+    const paymentBlocked = this.isPaymentBlocked(email);
+    const phase = paymentNoticePhase(amountCents, overdue, daysUntilDue, paymentEveryRoutes > 0 ? undefined : deadline.dueDate, paymentBlocked);
+    const noticeKey = `${deadline.dueDate || `routes:${paymentEveryRoutes}`}:${this.data.lastPayments[email] || "initial"}:${paymentBlocked ? "blocked" : "active"}`;
+    const day = billingDayKey(now);
+    const dismissal = this.data.noticeDismissals[email];
     const latestRoute = allEntries.filter((entry) => entry.decision === "billable" && entry.routeDispatchId)
       .sort((left, right) => Date.parse(right.reviewedAt || right.updatedAt) - Date.parse(left.reviewedAt || left.updatedAt))[0];
     const latestNoticeText = latestRoute
@@ -422,6 +451,8 @@ export class ImageUsageStore {
       principalCents,
       lateFeeCents,
       dailyLateFeeCents,
+      paymentBlocked,
+      billingNotice: phase ? { key: noticeKey, day, phase, dismissedToday: dismissal?.key === noticeKey && dismissal?.day === day } : undefined,
       unpaidRoutes: unpaid.length,
       dueDay: this.dueDay(email),
       dueDate: nextDue?.toISOString(),
@@ -465,6 +496,7 @@ export class ImageUsageStore {
       overdue: finance.overdue,
       daysOverdue: finance.daysOverdue,
       hasManualBalance: Object.prototype.hasOwnProperty.call(this.data.balanceAdjustments, clientEmail),
+      paymentBlocked: finance.paymentBlocked,
       defaultAmountCents: this.routePrice(clientEmail),
       manualTotalAmountCents,
       billAllValidatedRoutes: true,
@@ -568,7 +600,9 @@ export class ImageUsageStore {
             creditBalances: parsed.creditBalances && typeof parsed.creditBalances === "object" ? parsed.creditBalances : {},
             dueDates: parsed.dueDates && typeof parsed.dueDates === "object" ? parsed.dueDates : {},
             balanceAdjustments: parsed.balanceAdjustments && typeof parsed.balanceAdjustments === "object" ? parsed.balanceAdjustments : {},
-            financeEvents: Array.isArray(parsed.financeEvents) ? parsed.financeEvents : []
+            financeEvents: Array.isArray(parsed.financeEvents) ? parsed.financeEvents : [],
+            paymentBlocks: parsed.paymentBlocks && typeof parsed.paymentBlocks === "object" ? parsed.paymentBlocks : {},
+            noticeDismissals: parsed.noticeDismissals && typeof parsed.noticeDismissals === "object" ? parsed.noticeDismissals : {}
           };
         }
       } catch {
@@ -576,7 +610,7 @@ export class ImageUsageStore {
       }
     }
     if (fs.existsSync(this.filePath) || fs.existsSync(backupPath)) throw new Error("Registro de consumo inválido. Restaure um backup antes de gravar novos dados.");
-    return { entries: [], defaultAmounts: {}, monthlyTotalOverrides: {}, monthlyTotalBaselines: {}, billAllValidatedRoutes: {}, routePrices: {}, prepaidRoutes: {}, dueDays: {}, paymentEveryRoutes: {}, lastPayments: {}, deletedRoutes: {}, creditBalances: {}, dueDates: {}, balanceAdjustments: {}, financeEvents: [] };
+    return { entries: [], defaultAmounts: {}, monthlyTotalOverrides: {}, monthlyTotalBaselines: {}, billAllValidatedRoutes: {}, routePrices: {}, prepaidRoutes: {}, dueDays: {}, paymentEveryRoutes: {}, lastPayments: {}, deletedRoutes: {}, creditBalances: {}, dueDates: {}, balanceAdjustments: {}, financeEvents: [], paymentBlocks: {}, noticeDismissals: {} };
   }
 
   private save() {

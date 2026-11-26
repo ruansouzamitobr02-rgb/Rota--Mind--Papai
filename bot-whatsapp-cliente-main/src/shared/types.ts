@@ -334,6 +334,7 @@ export type ImageUsageClientSummary = {
   overdue?: boolean;
   daysOverdue?: number;
   hasManualBalance?: boolean;
+  paymentBlocked?: boolean;
   defaultAmountCents: number;
   manualTotalAmountCents?: number;
   routePriceCents: number;
@@ -353,6 +354,8 @@ export type ClientImageUsageSnapshot = {
   principalCents?: number;
   lateFeeCents?: number;
   dailyLateFeeCents?: number;
+  paymentBlocked?: boolean;
+  billingNotice?: { key: string; day: string; phase: "upcoming" | "due_today" | "overdue" | "blocked"; dismissedToday: boolean };
   unpaidRoutes: number;
   dueDay: number;
   dueDate?: string;
@@ -365,6 +368,7 @@ export type ClientImageUsageSnapshot = {
 };
 
 export type ClientFinanceSettings = {
+  paymentBlocked?: boolean;
   balanceCents?: number;
   dueDate?: string | null;
   routePriceCents?: number;
@@ -377,7 +381,7 @@ export type ClientFinanceSettings = {
 export type FinanceEvent = {
   id: string;
   clientEmail: string;
-  type: "balance" | "deadline" | "payment" | "rules";
+  type: "balance" | "deadline" | "payment" | "rules" | "blocked" | "unblocked";
   amountCents?: number;
   previousAmountCents?: number;
   dueDate?: string | null;

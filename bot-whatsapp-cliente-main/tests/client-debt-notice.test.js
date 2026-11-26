@@ -106,6 +106,18 @@ test("HTTP: situação financeira é privada e quitação do administrador limpa
   const patch = body => fetch(base + `/api/admin/client-finance/${client}`, { method: "PATCH", headers: { "x-panel-token": adminToken, "content-type": "application/json" }, body: JSON.stringify(body) });
   assert.equal((await patch({ balanceCents: 12345, dueDate: "2027-02-31" })).status, 400);
   assert.equal((await (await request("/api/billing/status", clientToken)).json()).amountCents, 500);
+  const notice = (await (await request("/api/billing/status", clientToken)).json()).billingNotice;
+  const dismiss = token => fetch(base + "/api/billing/dismiss", { method: "POST", headers: { "x-panel-token": token, "content-type": "application/json" }, body: JSON.stringify({ key: notice.key }) });
+  assert.equal((await dismiss(clientToken)).status, 200);
+  assert.equal((await (await request("/api/billing/status", clientToken)).json()).billingNotice.dismissedToday, true);
+  assert.equal((await dismiss(otherToken)).status, 409);
+  assert.equal((await patch({ paymentBlocked: true })).status, 200);
+  assert.equal((await request("/api/me", clientToken)).status, 200);
+  for (const action of ["start", "restart", "start-monitoring", "start-image-monitoring", "start-nuclear-monitoring", "start-test-monitoring", "manual-dispatch", "simulate-opening"]) {
+    assert.equal((await request(`/api/action/${action}`, clientToken, "POST")).status, 423, `bloqueio não protegeu ${action}`);
+  }
+  assert.equal((await request(`/api/admin/users/${client}/action/start-monitoring`, adminToken, "POST")).status, 423);
+  assert.equal((await patch({ paymentBlocked: false })).status, 200);
   const edited = await patch({ balanceCents: 12345, dueDate: "2027-01-15" });
   assert.equal(edited.status, 200);
   const customer = (await edited.json()).clients.find(item => item.clientEmail === client);

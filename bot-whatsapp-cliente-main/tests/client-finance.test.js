@@ -22,9 +22,9 @@ test("data exata domina prazo antigo e a taxa é simples por dia de São Paulo",
   let before = store.clientSnapshot(email, "2026-11", new Date("2026-11-16T02:59:59Z"));
   assert.equal(before.amountCents, 10000); assert.equal(before.overdue, false);
   const after = store.clientSnapshot(email, "2026-11", new Date("2026-11-16T03:00:00Z"));
-  assert.equal(after.lateFeeCents, 100); assert.equal(after.amountCents, 10100);
+  assert.equal(after.lateFeeCents, 50); assert.equal(after.amountCents, 10050);
   const later = store.clientSnapshot(email, "2026-11", new Date("2026-11-25T12:00:00Z"));
-  assert.equal(later.principalCents, 10000); assert.equal(later.lateFeeCents, 1000); assert.equal(later.amountCents, 11000);
+  assert.equal(later.principalCents, 10000); assert.equal(later.lateFeeCents, 500); assert.equal(later.amountCents, 10500);
   assert.deepEqual(store.clientSnapshot(email, "2026-11", new Date("2026-11-25T12:00:00Z")), later);
 });
 
@@ -83,7 +83,7 @@ test("nova data troca ciclo por quantidade; sem data explícita não inventa tax
   assert.equal(store.clientSnapshot(fernando).dailyLateFeeCents, 0);
   store.updateClientFinance(fernando, { dueDate: "2026-11-01" });
   assert.equal(store.paymentEveryRoutes(fernando), 0);
-  assert.equal(store.clientSnapshot(fernando, "2026-11", new Date("2026-11-03T12:00:00Z")).lateFeeCents, 200);
+  assert.equal(store.clientSnapshot(fernando, "2026-11", new Date("2026-11-03T12:00:00Z")).lateFeeCents, 100);
   store.updateClientFinance(fernando, { paymentEveryRoutes: 10 });
   assert.equal(store.clientSnapshot(fernando).dailyLateFeeCents, 0);
 });

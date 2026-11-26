@@ -17,6 +17,7 @@ import { LeaderStore, normalizePhone as normalizeLeaderPhone } from "./leaderSto
 import { defaultUserColor, normalizeDispatchAdvantageMs, normalizeDispatchBeatsEmail, normalizeDispatchMatchups, normalizeDispatchPriorityLevel, normalizeUserColor, PanelUserStore, StoredPanelUser } from "./panelUserStore";
 import { SupportMessageStore } from "./supportMessageStore";
 import { FinanceValidationError, ImageUsageStore } from "./imageUsageStore";
+import { billingDayKey } from "./shared/billingPolicy";
 import { validatedRouteUsagePayload } from "./validatedRouteUsage";
 import { getRouteDecisionStatus, isRouteDeleted } from "./shared/routeLifecycle";
 import { PushNotificationStore } from "./pushNotificationStore";
@@ -504,6 +505,10 @@ function getBotForEmail(email: string) {
     });
   });
   nextBot.on("dispatch-gate-request", (request: { id: string; clientEmail: string; groupKey: string; eventDetectedAt: number; eventKey?: string; targetDispatchMode?: "manual" | "ocr" }) => {
+    if (imageUsageStore.isPaymentBlocked(normalizedEmail)) {
+      nextBot.resolveDispatchGate(request.id, { error: "Bot bloqueado por pagamento pendente." });
+      return;
+    }
     // Critical sends defer the large snapshot. Use the mode of this actual
     // request so a recent mode change cannot attach it to the wrong race.
     const clients = getConditionalPriorityClients().map((client) => client.email === normalizedEmail
@@ -517,6 +522,11 @@ function getBotForEmail(email: string) {
       eventKey: request.eventKey,
       blockers
     }).then((grant) => {
+      if (imageUsageStore.isPaymentBlocked(normalizedEmail)) {
+        dispatchRaceCoordinator.failRelay(grant.token, normalizedEmail);
+        nextBot.resolveDispatchGate(request.id, { error: "Bot bloqueado por pagamento pendente." });
+        return;
+      }
       nextBot.resolveDispatchGate(request.id, grant);
     }).catch((error) => {
       nextBot.resolveDispatchGate(request.id, { error: error instanceof Error ? error.message : String(error) });
@@ -1047,12 +1057,12 @@ function sendClientPush(email: string, notification: Parameters<PushNotification
 
 const financeReminderSent = new Map<string, string>();
 function notifyClientsAboutUpcomingPayments() {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = billingDayKey();
   for (const email of getClientEmails()) {
     const activeBot = bots.get(email);
     if (activeBot && (activeBot.getSnapshot().monitoringEnabled || activeBot.isCriticalDispatchActive())) continue;
     const finance = imageUsageStore.clientSnapshot(email);
-    if (!finance.billingReminder || !finance.dueDate) continue;
+    if (!finance.billingReminder || !finance.dueDate || finance.billingNotice?.dismissedToday) continue;
     const reminderKey = `${finance.dueDate.slice(0, 10)}:${today}`;
     if (financeReminderSent.get(email) === reminderKey) continue;
     financeReminderSent.set(email, reminderKey);
@@ -1172,7 +1182,10 @@ function logSnapshot(email: string) {
   console.log("------------------------------------");
 }
 
-async function handleAction(bot: BotProcessProxy, action: string, body: any) {
+async function handleAction(bot: BotProcessProxy, action: string, body: any, clientEmail: string) {
+  if (imageUsageStore.isPaymentBlocked(clientEmail) && !["stop", "stop-monitoring", "submit-route-incident", "snooze-route-incident"].includes(action)) {
+    throw new HttpError(423, "Uso do bot bloqueado por pagamento pendente. Consulte o aviso de cobrança.");
+  }
   for (const field of ["codes", "routes", "optionIds", "ocrDesiredCages"]) {
     if (field === "routes" && action === "save-route-preset") continue;
     const values = body[field];
@@ -1554,6 +1567,14 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/api/billing/dismiss") {
+      const body = await readJsonBody(request);
+      if (typeof body.key !== "string" || body.key.length > 300) throw new HttpError(400, "Aviso inválido.");
+      try { sendJson(response, 200, imageUsageStore.dismissBillingNotice(authorizedEmail, body.key)); }
+      catch (error) { if (error instanceof FinanceValidationError) throw new HttpError(409, error.message); throw error; }
+      return;
+    }
+
     if (request.method === "GET" && url.pathname === "/api/analysis-preview") {
       const email = String(url.searchParams.get("client") || authorizedEmail).trim().toLowerCase();
       if (email !== authorizedEmail && getUserRole(authorizedEmail) !== "admin") {
@@ -1932,8 +1953,17 @@ const server = http.createServer(async (request, response) => {
       const clientEmail = decodeURIComponent(url.pathname.replace("/api/admin/client-finance/", "")).trim().toLowerCase();
       const body = await readJsonBody(request);
       if (!panelUsers.has(clientEmail)) throw new HttpError(404, "Cliente não encontrado.");
+      if (body.paymentBlocked === true && getUserRole(clientEmail) === "admin") throw new HttpError(400, "O bloqueio financeiro é exclusivo para contas de clientes.");
       try { imageUsageStore.updateClientFinance(clientEmail, body, authorizedEmail); }
       catch (error) { if (error instanceof FinanceValidationError) throw new HttpError(400, error.message); throw error; }
+      if (body.paymentBlocked === true) {
+        dispatchRaceCoordinator.cancelClient(clientEmail, "Bot bloqueado por pagamento pendente.");
+        const clientBot = bots.get(clientEmail);
+        if (clientBot) {
+          try { await clientBot.stop(); }
+          catch { await clientBot.shutdown(); bots.delete(clientEmail); }
+        }
+      }
       broadcastAdminSnapshot();
       broadcastSnapshot(clientEmail);
       sendJson(response, 200, imageUsageStore.snapshot());
@@ -2088,7 +2118,7 @@ const server = http.createServer(async (request, response) => {
         return;
       }
       const body = await readJsonBody(request);
-      await handleAction(getBotForEmail(targetEmail), decodeURIComponent(action), body);
+      await handleAction(getBotForEmail(targetEmail), decodeURIComponent(action), body, targetEmail);
       broadcastAdminSnapshot();
       sendJson(response, 200, getAdminUserDetail(targetEmail));
       return;
@@ -2266,7 +2296,7 @@ const server = http.createServer(async (request, response) => {
         sendJson(response, 423, { error: "Explique o incidente pendente antes de usar o bot." });
         return;
       }
-      await handleAction(activeBot!, action, body);
+      await handleAction(activeBot!, action, body, authorizedEmail);
       sendJson(response, 200, getClientSnapshot(authorizedEmail));
       return;
     }
