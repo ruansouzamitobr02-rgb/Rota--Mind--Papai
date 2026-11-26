@@ -6,7 +6,7 @@ Custos, cobrança de taxas e integração bancária/Pix ficaram para outra atual
 - O cliente com saldo vencido vê o valor real em aberto e pode fechar o aviso.
 - O lembrete reaparece após cinco minutos, enquanto a pendência continuar.
 - Uma borda âmbar indica a pendência sem bloquear o uso do bot.
-- Com o bot armado, durante ações ou com análise/incidente aberto, o aviso fica
+- Com o bot armado, aguardando confirmação de envio, durante ações ou com análise/incidente aberto, o aviso fica
   oculto e suas consultas periódicas são interrompidas. A borda não recebe cliques.
 - O administrador registra a quitação pelo botão já existente em Custos. O
   pagamento é propagado ao cliente e retira aviso e borda. A consulta também é

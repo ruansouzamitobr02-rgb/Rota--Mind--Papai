@@ -76,7 +76,11 @@ const deadline = setTimeout(() => { console.error("Client debt audit timed out")
   assert.equal(billingRequests, requestsWhileArmed, "não deve fazer consulta financeira enquanto armado");
   assert.equal(await js("getComputedStyle(document.querySelector('.client-debt-frame')).pointerEvents"), "none");
   console.log("PASS: armar oculta o aviso e suspende consultas; borda não intercepta cliques.");
-  snapshot.monitoringEnabled = false; broadcast();
+  snapshot.monitoringEnabled = false; snapshot.performanceMetrics = { activeQueue: 1 }; broadcast();
+  await delay(150);
+  assert.equal(await js("Boolean(document.querySelector('.client-debt-dialog'))"), false, "ACK pendente ainda deve proteger o envio");
+  assert.equal(billingRequests, requestsWhileArmed);
+  snapshot.performanceMetrics.activeQueue = 0; broadcast();
   await waitFor(window, "Boolean(document.querySelector('.client-debt-dialog'))", "aviso não retornou após desarmar");
   // A slow read started before payment cannot resurrect the settled debt.
   holdResponse = true;
