@@ -11,7 +11,7 @@ const streams = new Set();
 let billingRequests = 0;
 let pendingResponse;
 let holdResponse = false;
-let finance = { month: "2026-11", amountCents: 7500, unpaidRoutes: 15, dueDay: 15,
+let finance = { month: "2026-11", amountCents: 7500, principalCents: 6500, lateFeeCents: 1000, dailyLateFeeCents: 100, unpaidRoutes: 15, dueDay: 15,
   dueDate: "2026-11-15T23:59:59.999-03:00", daysOverdue: 10, overdue: true, paymentEveryRoutes: 0 };
 const snapshot = { status: "connected", groupState: "closed", qrCode: "", config: { ...DEFAULT_CONFIG, nomeEnvio: "Cliente", grupoAlvoJid: "test@g.us" },
   monitoringEnabled: false, groups: [], logs: [], readinessChecks: [], routeDispatches: [], statusEvents: [], imageUsage: finance };
@@ -55,6 +55,8 @@ const deadline = setTimeout(() => { console.error("Client debt audit timed out")
   await window.loadURL(base);
   await waitFor(window, "Boolean(document.querySelector('.client-debt-dialog'))", "aviso de débito não abriu");
   assert.match(await js("document.querySelector('.client-debt-amount').textContent"), /75,00/);
+  assert.match(await js("document.querySelector('.client-debt-breakdown').textContent"), /1,00/);
+  assert.match(await js("document.querySelector('.client-debt-breakdown').textContent"), /65,00/);
   const bounds = await js("(()=>{const r=document.querySelector('.client-debt-dialog').getBoundingClientRect();return {left:r.left,right:r.right,width:innerWidth}})()");
   assert.ok(bounds.left >= 0 && bounds.right <= bounds.width, "aviso ultrapassou a tela do celular");
   await delay(500);

@@ -16,7 +16,7 @@ import { DEFAULT_LEADER_CONTACTS } from "./bot/leaderDefaults";
 import { LeaderStore, normalizePhone as normalizeLeaderPhone } from "./leaderStore";
 import { defaultUserColor, normalizeDispatchAdvantageMs, normalizeDispatchBeatsEmail, normalizeDispatchMatchups, normalizeDispatchPriorityLevel, normalizeUserColor, PanelUserStore, StoredPanelUser } from "./panelUserStore";
 import { SupportMessageStore } from "./supportMessageStore";
-import { ImageUsageStore } from "./imageUsageStore";
+import { FinanceValidationError, ImageUsageStore } from "./imageUsageStore";
 import { validatedRouteUsagePayload } from "./validatedRouteUsage";
 import { getRouteDecisionStatus, isRouteDeleted } from "./shared/routeLifecycle";
 import { PushNotificationStore } from "./pushNotificationStore";
@@ -1930,28 +1930,10 @@ const server = http.createServer(async (request, response) => {
     if (request.method === "PATCH" && url.pathname.startsWith("/api/admin/client-finance/")) {
       if (!requireAdmin(authorizedEmail, response)) return;
       const clientEmail = decodeURIComponent(url.pathname.replace("/api/admin/client-finance/", "")).trim().toLowerCase();
-      const body = await readJsonBody<{ routePriceCents?: number; dueDay?: number; addPrepaidRoutes?: number; prepaidRoutesRemaining?: number; paymentEveryRoutes?: number }>(request);
-      if (!panelUsers.has(clientEmail)) throw new HttpError(404, "Cliente nÃ£o encontrado.");
-      if (body.routePriceCents !== undefined) {
-        if (!Number.isSafeInteger(body.routePriceCents) || body.routePriceCents < 0 || body.routePriceCents > 10_000_000) throw new HttpError(400, "Valor por rota invÃ¡lido.");
-        imageUsageStore.setRoutePrice(clientEmail, body.routePriceCents);
-      }
-      if (body.dueDay !== undefined) {
-        if (!Number.isInteger(body.dueDay) || body.dueDay < 1 || body.dueDay > 31) throw new HttpError(400, "O vencimento deve ser entre os dias 1 e 31.");
-        imageUsageStore.setDueDay(clientEmail, body.dueDay);
-      }
-      if (body.addPrepaidRoutes !== undefined) {
-        if (!Number.isInteger(body.addPrepaidRoutes) || body.addPrepaidRoutes < 1 || body.addPrepaidRoutes > 10_000) throw new HttpError(400, "Quantidade de rotas prÃ©-pagas invÃ¡lida.");
-        imageUsageStore.addPrepaidRoutes(clientEmail, body.addPrepaidRoutes);
-      }
-      if (body.prepaidRoutesRemaining !== undefined) {
-        if (!Number.isInteger(body.prepaidRoutesRemaining) || body.prepaidRoutesRemaining < 0 || body.prepaidRoutesRemaining > 10_000) throw new HttpError(400, "Quantidade de rotas antecipadas inválida.");
-        imageUsageStore.setPrepaidRoutes(clientEmail, body.prepaidRoutesRemaining);
-      }
-      if (body.paymentEveryRoutes !== undefined) {
-        if (!Number.isInteger(body.paymentEveryRoutes) || body.paymentEveryRoutes < 0 || body.paymentEveryRoutes > 10_000) throw new HttpError(400, "A quantidade de rotas por ciclo deve ser entre 0 e 10000.");
-        imageUsageStore.setPaymentEveryRoutes(clientEmail, body.paymentEveryRoutes);
-      }
+      const body = await readJsonBody(request);
+      if (!panelUsers.has(clientEmail)) throw new HttpError(404, "Cliente não encontrado.");
+      try { imageUsageStore.updateClientFinance(clientEmail, body, authorizedEmail); }
+      catch (error) { if (error instanceof FinanceValidationError) throw new HttpError(400, error.message); throw error; }
       broadcastAdminSnapshot();
       broadcastSnapshot(clientEmail);
       sendJson(response, 200, imageUsageStore.snapshot());
@@ -1962,7 +1944,7 @@ const server = http.createServer(async (request, response) => {
       if (!requireAdmin(authorizedEmail, response)) return;
       const clientEmail = decodeURIComponent(url.pathname.replace("/api/admin/client-payment/", "")).trim().toLowerCase();
       if (!panelUsers.has(clientEmail)) throw new HttpError(404, "Cliente nÃ£o encontrado.");
-      imageUsageStore.registerPayment(clientEmail);
+      imageUsageStore.registerPayment(clientEmail, authorizedEmail);
       broadcastAdminSnapshot();
       broadcastSnapshot(clientEmail);
       sendJson(response, 200, imageUsageStore.snapshot());

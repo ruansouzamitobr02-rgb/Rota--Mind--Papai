@@ -1,7 +1,9 @@
 # Aviso de débito — 25/11/2026
 
-Esta etapa acrescenta somente a comunicação de saldo vencido. A reformulação de
-Custos, cobrança de taxas e integração bancária/Pix ficaram para outra atualização.
+O aviso se integra à nova área de Custos, com saldo manual do cliente e data exata.
+O pagamento continua sendo registrado pelo administrador após conferir o banco;
+esta versão não integra QR Code ou confirmação bancária automática. Consulte
+[Custos e cobrança](CUSTOS_E_COBRANCA.md) para configurar saldo, data e taxa.
 
 - O cliente com saldo vencido vê o valor real em aberto e pode fechar o aviso.
 - O lembrete reaparece após cinco minutos, enquanto a pendência continuar.

@@ -326,6 +326,14 @@ export type ImageUsageClientSummary = {
   excluded: number;
   detected: number;
   amountCents: number;
+  principalCents?: number;
+  lateFeeCents?: number;
+  dailyLateFeeCents?: number;
+  dueDate?: string;
+  configuredDueDate?: string | null;
+  overdue?: boolean;
+  daysOverdue?: number;
+  hasManualBalance?: boolean;
   defaultAmountCents: number;
   manualTotalAmountCents?: number;
   routePriceCents: number;
@@ -342,6 +350,9 @@ export type ImageUsageClientSummary = {
 export type ClientImageUsageSnapshot = {
   month: string;
   amountCents: number;
+  principalCents?: number;
+  lateFeeCents?: number;
+  dailyLateFeeCents?: number;
   unpaidRoutes: number;
   dueDay: number;
   dueDate?: string;
@@ -353,11 +364,33 @@ export type ClientImageUsageSnapshot = {
   latestNotice?: { id: string; text: string };
 };
 
+export type ClientFinanceSettings = {
+  balanceCents?: number;
+  dueDate?: string | null;
+  routePriceCents?: number;
+  dueDay?: number;
+  prepaidRoutesRemaining?: number;
+  addPrepaidRoutes?: number;
+  paymentEveryRoutes?: number;
+};
+
+export type FinanceEvent = {
+  id: string;
+  clientEmail: string;
+  type: "balance" | "deadline" | "payment" | "rules";
+  amountCents?: number;
+  previousAmountCents?: number;
+  dueDate?: string | null;
+  createdAt: string;
+  performedBy: string;
+};
+
 export type AdminImageUsageSnapshot = {
   month: string;
   entries: ImageUsageEntry[];
   ledgerEntries?: ImageUsageEntry[];
   clients: ImageUsageClientSummary[];
+  financeEvents?: FinanceEvent[];
   totals: Omit<ImageUsageClientSummary, "clientEmail" | "month" | "defaultAmountCents" | "manualTotalAmountCents" | "billAllValidatedRoutes" | "routePriceCents" | "prepaidRoutesRemaining" | "dueDay" | "paymentEveryRoutes" | "lastPaymentAt">;
 };
 

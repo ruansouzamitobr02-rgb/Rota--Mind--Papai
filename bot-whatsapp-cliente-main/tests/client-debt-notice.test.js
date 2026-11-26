@@ -103,6 +103,14 @@ test("HTTP: situação financeira é privada e quitação do administrador limpa
   assert.equal(status.amountCents, 500); assert.equal(status.overdue, true);
   assert.equal((await (await request(`/api/billing/status?email=${client}`, otherToken)).json()).amountCents, 0);
   assert.equal((await request(`/api/admin/client-payment/${client}`, clientToken, "POST")).status, 403);
+  const patch = body => fetch(base + `/api/admin/client-finance/${client}`, { method: "PATCH", headers: { "x-panel-token": adminToken, "content-type": "application/json" }, body: JSON.stringify(body) });
+  assert.equal((await patch({ balanceCents: 12345, dueDate: "2027-02-31" })).status, 400);
+  assert.equal((await (await request("/api/billing/status", clientToken)).json()).amountCents, 500);
+  const edited = await patch({ balanceCents: 12345, dueDate: "2027-01-15" });
+  assert.equal(edited.status, 200);
+  const customer = (await edited.json()).clients.find(item => item.clientEmail === client);
+  assert.equal(customer.principalCents, 12345); assert.equal(customer.routePriceCents, 500);
+  assert.equal(customer.configuredDueDate, "2027-01-15");
   assert.equal((await request(`/api/admin/client-payment/${client}`, adminToken, "POST")).status, 200);
   const paid = await (await request("/api/billing/status", clientToken)).json();
   assert.equal(paid.amountCents, 0); assert.equal(paid.overdue, false);

@@ -1,8 +1,9 @@
 import { writeJsonAtomic } from "./storageJson";
 import fs from "fs";
-import { AdminImageUsageSnapshot, ClientImageUsageSnapshot, ImageAnalysisResult, ImageUsageDecision, ImageUsageEntry, RouteDispatch } from "./shared/types";
+import { AdminImageUsageSnapshot, ClientImageUsageSnapshot, ClientFinanceSettings, FinanceEvent, ImageAnalysisResult, ImageUsageDecision, ImageUsageEntry, RouteDispatch } from "./shared/types";
+import { randomUUID } from "crypto";
 import { isRouteDeleted, routeDeletedAt } from "./shared/routeLifecycle";
-import { getBillingDeadline } from "./shared/billingDeadline";
+import { getBillingDeadline, isBillingDate } from "./shared/billingDeadline";
 type StoredImageUsage = {
   entries: ImageUsageEntry[];
   defaultAmounts: Record<string, number>;
@@ -16,6 +17,9 @@ type StoredImageUsage = {
   lastPayments: Record<string, string>;
   deletedRoutes: Record<string, string>;
   creditBalances: Record<string, number>;
+  dueDates: Record<string, string | null>;
+  balanceAdjustments: Record<string, number>;
+  financeEvents: FinanceEvent[];
 };
 
 type RecordAnalysisInput = {
@@ -41,6 +45,7 @@ type ValidatedRouteUsageInput = Omit<RecordAnalysisInput, "id"> & {
 };
 
 const MAX_ENTRIES = 50_000;
+export class FinanceValidationError extends Error {}
 
 export class ImageUsageStore {
   private data: StoredImageUsage;
@@ -247,7 +252,8 @@ export class ImageUsageStore {
         delete this.data.deletedRoutes[key];
       }
     }
-    for (const map of [this.data.routePrices, this.data.prepaidRoutes, this.data.creditBalances, this.data.dueDays, this.data.paymentEveryRoutes, this.data.lastPayments]) {
+    this.data.financeEvents = this.data.financeEvents.map(event => event.clientEmail === previous ? { ...event, clientEmail: next } : event);
+    for (const map of [this.data.routePrices, this.data.prepaidRoutes, this.data.creditBalances, this.data.dueDays, this.data.paymentEveryRoutes, this.data.lastPayments, this.data.dueDates, this.data.balanceAdjustments]) {
       if (Object.prototype.hasOwnProperty.call(map, previous)) {
         map[next] = map[previous];
         delete map[previous];
@@ -297,13 +303,17 @@ export class ImageUsageStore {
     this.save();
   }
 
-  registerPayment(clientEmail: string) {
+  registerPayment(clientEmail: string, performedBy = "admin") {
     const email = clientEmail.trim().toLowerCase();
+    const paidAmount = this.clientSnapshot(email).amountCents;
     const now = new Date().toISOString();
     this.data.entries = this.data.entries.map((entry) => entry.clientEmail === email && entry.decision === "billable" && (entry.paymentStatus || "unpaid") === "unpaid"
       ? { ...entry, paymentStatus: "paid", paidAt: now, updatedAt: now }
       : entry);
     this.data.lastPayments[email] = now;
+    delete this.data.balanceAdjustments[email];
+    if (Object.prototype.hasOwnProperty.call(this.data.dueDates, email)) this.data.dueDates[email] = null;
+    if (paidAmount > 0) this.addFinanceEvent(email, "payment", performedBy, { amountCents: paidAmount });
     for (const map of [this.data.monthlyTotalOverrides, this.data.monthlyTotalBaselines]) {
       for (const key of Object.keys(map)) if (key.endsWith(`:${email}`)) delete map[key];
     }
@@ -316,19 +326,62 @@ export class ImageUsageStore {
     const key = this.monthlyTotalKey(email, month);
     this.data.monthlyTotalOverrides[key] = this.normalizeAmount(amountCents);
     this.data.monthlyTotalBaselines[key] = this.calculatedBalance(email);
+    this.data.balanceAdjustments[email] = this.data.monthlyTotalOverrides[key] - this.data.monthlyTotalBaselines[key];
     this.save();
+  }
+
+  updateClientFinance(clientEmail: string, settings: ClientFinanceSettings, performedBy = "admin") {
+    const email = clientEmail.trim().toLowerCase();
+    if (!settings || typeof settings !== "object" || Array.isArray(settings)) throw new FinanceValidationError("Configuração financeira inválida.");
+    const ranges: [keyof ClientFinanceSettings, number, number][] = [["balanceCents", 0, 10_000_000], ["routePriceCents", 0, 10_000_000],
+      ["prepaidRoutesRemaining", 0, 10_000], ["addPrepaidRoutes", 1, 10_000], ["paymentEveryRoutes", 0, 10_000], ["dueDay", 1, 31]];
+    for (const [key, min, max] of ranges) {
+      const value = settings[key];
+      if (value !== undefined && (!Number.isSafeInteger(value) || Number(value) < min || Number(value) > max)) throw new FinanceValidationError(`Valor inválido no campo ${key}.`);
+    }
+    if (settings.dueDate !== undefined && settings.dueDate !== null && !isBillingDate(settings.dueDate)) throw new FinanceValidationError("Informe uma data de vencimento válida.");
+    if (settings.dueDate && settings.paymentEveryRoutes > 0) throw new FinanceValidationError("Escolha vencimento por data ou por quantidade de rotas.");
+    // Validate every field before changing anything, then persist one transaction.
+    if (settings.balanceCents !== undefined) {
+      const previousAmountCents = this.payableBalance(email, this.currentMonth());
+      this.data.balanceAdjustments[email] = settings.balanceCents - this.calculatedBalance(email);
+      for (const map of [this.data.monthlyTotalOverrides, this.data.monthlyTotalBaselines]) {
+        for (const key of Object.keys(map)) if (key.endsWith(`:${email}`)) delete map[key];
+      }
+      this.addFinanceEvent(email, "balance", performedBy, { amountCents: settings.balanceCents, previousAmountCents });
+    }
+    if (settings.dueDate !== undefined) {
+      this.data.dueDates[email] = settings.dueDate;
+      this.data.paymentEveryRoutes[email] = 0;
+      this.addFinanceEvent(email, "deadline", performedBy, { dueDate: settings.dueDate });
+    }
+    if (settings.routePriceCents !== undefined) this.data.defaultAmounts[email] = this.data.routePrices[email] = settings.routePriceCents;
+    if (settings.dueDay !== undefined) this.data.dueDays[email] = settings.dueDay;
+    if (settings.addPrepaidRoutes !== undefined) this.data.prepaidRoutes[email] = (this.data.prepaidRoutes[email] || 0) + settings.addPrepaidRoutes;
+    if (settings.prepaidRoutesRemaining !== undefined) this.data.prepaidRoutes[email] = settings.prepaidRoutesRemaining;
+    if (settings.paymentEveryRoutes !== undefined) {
+      this.data.paymentEveryRoutes[email] = settings.paymentEveryRoutes;
+      if (settings.paymentEveryRoutes > 0) this.data.dueDates[email] = null;
+    }
+    if (ranges.slice(1).some(([key]) => settings[key] !== undefined)) this.addFinanceEvent(email, "rules", performedBy);
+    this.save();
+  }
+
+  private addFinanceEvent(clientEmail: string, type: FinanceEvent["type"], performedBy: string, details: Partial<FinanceEvent> = {}) {
+    this.data.financeEvents = [{ ...details, id: randomUUID(), clientEmail, type, performedBy, createdAt: new Date().toISOString() }, ...this.data.financeEvents].slice(0, 10_000);
   }
 
   snapshot(month = this.currentMonth()): AdminImageUsageSnapshot {
     const entries = this.data.entries.filter((entry) => entry.createdAt.slice(0, 7) === month);
     const overrideEmails = Object.keys(this.data.monthlyTotalOverrides).filter((key) => key.startsWith(`${month}:`)).map((key) => key.slice(month.length + 1));
-    const emails = new Set([...Object.keys(this.data.defaultAmounts), ...Object.keys(this.data.routePrices), ...Object.keys(this.data.prepaidRoutes), ...Object.keys(this.data.dueDays), ...Object.keys(this.data.paymentEveryRoutes), ...Object.keys(this.data.billAllValidatedRoutes), ...overrideEmails, ...this.data.entries.map((entry) => entry.clientEmail)]);
+    const emails = new Set([...Object.keys(this.data.balanceAdjustments), ...Object.keys(this.data.dueDates), ...Object.keys(this.data.defaultAmounts), ...Object.keys(this.data.routePrices), ...Object.keys(this.data.prepaidRoutes), ...Object.keys(this.data.dueDays), ...Object.keys(this.data.paymentEveryRoutes), ...Object.keys(this.data.billAllValidatedRoutes), ...overrideEmails, ...this.data.entries.map((entry) => entry.clientEmail)]);
     const clients = Array.from(emails).map((email) => this.summary(email, month, entries)).sort((a, b) => b.amountCents - a.amountCents || a.clientEmail.localeCompare(b.clientEmail));
     return {
       month,
       entries,
       ledgerEntries: this.data.entries.slice(0, 2_000),
       clients,
+      financeEvents: this.data.financeEvents,
       totals: {
         total: entries.length,
         pending: entries.filter((entry) => entry.decision === "pending").length,
@@ -347,11 +400,14 @@ export class ImageUsageStore {
     const entries = allEntries.filter((entry) => entry.createdAt.slice(0, 7) === month);
     const unpaid = allEntries.filter((entry) => entry.decision === "billable" && (entry.paymentStatus || "unpaid") === "unpaid");
     const firstUnpaidAt = unpaid.map(entry => entry.reviewedAt || entry.createdAt).filter(value => Number.isFinite(Date.parse(value))).sort()[0];
-    const deadline = getBillingDeadline(this.dueDay(email), now, firstUnpaidAt, this.data.lastPayments[email]);
-    const nextDue = new Date(deadline.dueDate);
+    const deadline = getBillingDeadline(this.dueDay(email), now, firstUnpaidAt, this.data.lastPayments[email], this.data.dueDates[email]);
+    const nextDue = deadline.dueDate ? new Date(deadline.dueDate) : undefined;
     const { daysUntilDue, daysOverdue } = deadline;
-    const amountCents = this.payableBalance(email, month);
+    const principalCents = this.payableBalance(email, month);
     const paymentEveryRoutes = this.paymentEveryRoutes(email);
+    const dailyLateFeeCents = this.data.dueDates[email] && paymentEveryRoutes === 0 ? 100 : 0;
+    const lateFeeCents = principalCents > 0 ? daysOverdue * dailyLateFeeCents : 0;
+    const amountCents = principalCents + lateFeeCents;
     const overdue = amountCents > 0 && (paymentEveryRoutes > 0 ? unpaid.length >= paymentEveryRoutes : daysOverdue > 0);
     const latestRoute = allEntries.filter((entry) => entry.decision === "billable" && entry.routeDispatchId)
       .sort((left, right) => Date.parse(right.reviewedAt || right.updatedAt) - Date.parse(left.reviewedAt || left.updatedAt))[0];
@@ -363,9 +419,12 @@ export class ImageUsageStore {
     return {
       month,
       amountCents,
+      principalCents,
+      lateFeeCents,
+      dailyLateFeeCents,
       unpaidRoutes: unpaid.length,
       dueDay: this.dueDay(email),
-      dueDate: nextDue.toISOString(),
+      dueDate: nextDue?.toISOString(),
       daysUntilDue,
       overdue,
       daysOverdue: paymentEveryRoutes > 0 ? 0 : daysOverdue,
@@ -377,17 +436,17 @@ export class ImageUsageStore {
         ? unpaid.length >= this.paymentEveryRoutes(email)
           ? `${unpaid.length} rota(s) confirmadas desde o último pagamento. Ciclo de ${this.paymentEveryRoutes(email)} rotas: saldo atual ${(amountCents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}.`
           : undefined
-        : (unpaid.length || amountCents > 0) && daysUntilDue <= 3
-          ? `Faltam ${daysUntilDue} dia(s) para o vencimento (${nextDue.toLocaleDateString("pt-BR")}). ${unpaid.length} rota(s) em aberto: ${(amountCents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}.`
+        : nextDue && (unpaid.length || amountCents > 0) && daysUntilDue <= 3
+          ? `Faltam ${daysUntilDue} dia(s) para o vencimento (${nextDue.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" })}). ${unpaid.length} rota(s) em aberto: ${(amountCents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}.`
           : undefined
     };
   }
 
   private summary(clientEmail: string, month: string, entries: ImageUsageEntry[]) {
+    const finance = this.clientSnapshot(clientEmail, month);
     const clientEntries = entries.filter((entry) => entry.clientEmail === clientEmail);
     const allClientEntries = this.data.entries.filter((entry) => entry.clientEmail === clientEmail);
     const unpaidEntries = allClientEntries.filter((entry) => entry.decision === "billable" && (entry.paymentStatus || "unpaid") === "unpaid");
-    const calculatedAmountCents = unpaidEntries.reduce((total, entry) => total + entry.amountCents, 0);
     const manualTotalAmountCents = this.data.monthlyTotalOverrides[this.monthlyTotalKey(clientEmail, month)];
     return {
       clientEmail,
@@ -397,7 +456,15 @@ export class ImageUsageStore {
       billable: clientEntries.filter((entry) => entry.decision === "billable").length,
       excluded: clientEntries.filter((entry) => entry.decision === "excluded").length,
       detected: clientEntries.filter((entry) => entry.result === "detected").length,
-      amountCents: this.payableBalance(clientEmail, month, calculatedAmountCents),
+      amountCents: finance.amountCents,
+      principalCents: finance.principalCents,
+      lateFeeCents: finance.lateFeeCents,
+      dailyLateFeeCents: finance.dailyLateFeeCents,
+      dueDate: finance.dueDate,
+      configuredDueDate: this.data.dueDates[clientEmail],
+      overdue: finance.overdue,
+      daysOverdue: finance.daysOverdue,
+      hasManualBalance: Object.prototype.hasOwnProperty.call(this.data.balanceAdjustments, clientEmail),
       defaultAmountCents: this.routePrice(clientEmail),
       manualTotalAmountCents,
       billAllValidatedRoutes: true,
@@ -434,6 +501,7 @@ export class ImageUsageStore {
   }
 
   private payableBalance(email: string, month: string, calculated = this.calculatedBalance(email)) {
+    if (this.data.balanceAdjustments[email] !== undefined) return Math.max(0, calculated + this.data.balanceAdjustments[email]);
     const key = this.monthlyTotalKey(email, month);
     const target = this.data.monthlyTotalOverrides[key];
     const baseline = this.data.monthlyTotalBaselines[key];
@@ -497,7 +565,10 @@ export class ImageUsageStore {
             lastPayments: parsed.lastPayments && typeof parsed.lastPayments === "object" ? parsed.lastPayments : {},
             paymentEveryRoutes: parsed.paymentEveryRoutes && typeof parsed.paymentEveryRoutes === "object" ? parsed.paymentEveryRoutes : {},
             deletedRoutes: parsed.deletedRoutes && typeof parsed.deletedRoutes === "object" ? parsed.deletedRoutes : {},
-            creditBalances: parsed.creditBalances && typeof parsed.creditBalances === "object" ? parsed.creditBalances : {}
+            creditBalances: parsed.creditBalances && typeof parsed.creditBalances === "object" ? parsed.creditBalances : {},
+            dueDates: parsed.dueDates && typeof parsed.dueDates === "object" ? parsed.dueDates : {},
+            balanceAdjustments: parsed.balanceAdjustments && typeof parsed.balanceAdjustments === "object" ? parsed.balanceAdjustments : {},
+            financeEvents: Array.isArray(parsed.financeEvents) ? parsed.financeEvents : []
           };
         }
       } catch {
@@ -505,7 +576,7 @@ export class ImageUsageStore {
       }
     }
     if (fs.existsSync(this.filePath) || fs.existsSync(backupPath)) throw new Error("Registro de consumo inválido. Restaure um backup antes de gravar novos dados.");
-    return { entries: [], defaultAmounts: {}, monthlyTotalOverrides: {}, monthlyTotalBaselines: {}, billAllValidatedRoutes: {}, routePrices: {}, prepaidRoutes: {}, dueDays: {}, paymentEveryRoutes: {}, lastPayments: {}, deletedRoutes: {}, creditBalances: {} };
+    return { entries: [], defaultAmounts: {}, monthlyTotalOverrides: {}, monthlyTotalBaselines: {}, billAllValidatedRoutes: {}, routePrices: {}, prepaidRoutes: {}, dueDays: {}, paymentEveryRoutes: {}, lastPayments: {}, deletedRoutes: {}, creditBalances: {}, dueDates: {}, balanceAdjustments: {}, financeEvents: [] };
   }
 
   private save() {

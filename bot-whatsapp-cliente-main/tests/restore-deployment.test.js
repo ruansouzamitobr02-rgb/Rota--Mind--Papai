@@ -128,6 +128,7 @@ test("HTTP: exporta, importa em outro serviço, mantém login, clientes e rotas 
   const usage = new ImageUsageStore(path.join(source, "image_usage.json"));
   usage.setRoutePrice("antigo@test.com", 500);
   usage.setPrepaidRoutes("antigo@test.com", 10);
+  usage.updateClientFinance("antigo@test.com", { balanceCents: 12345, dueDate: "2027-01-15" }, adminEmail);
   const { ConfigStore } = require("../dist/bot/config");
   const config = new ConfigStore(path.join(userDir, "config.json"));
   config.save({ rotasMonitoradasDetalhadas: [{ cidade: "", bairro: "Centro", regiao: "Campos - Tamandaré", enabled: true }], codigosMensagensAlvo: ["J-29"] });
@@ -175,6 +176,8 @@ test("HTTP: exporta, importa em outro serviço, mantém login, clientes e rotas 
     const finance = new ImageUsageStore(path.join(target, "image_usage.json")).snapshot().clients.find((client) => client.clientEmail === "antigo@test.com");
     assert.equal(finance.routePriceCents, 500);
     assert.equal(finance.prepaidRoutesRemaining, 10);
+    assert.equal(finance.principalCents, 12345);
+    assert.equal(finance.configuredDueDate, "2027-01-15");
     // Both user profile and persisted neighborhood/cage preferences survive.
     const saved = JSON.parse(fs.readFileSync(path.join(target, "users", "antigo_test.com", "config.json"), "utf8"));
     assert.deepEqual(saved.codigosMensagensAlvo, ["J-29"]);

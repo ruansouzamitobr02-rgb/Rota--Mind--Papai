@@ -1,3 +1,4 @@
+import { CostsPanel } from "./CostsPanel";
 import { mergeUsageAmounts, parseMoneyInput } from "./usageDrafts";
 import { getRouteDecisionStatus, isRouteDeleted, routeDeletedAt } from "../../../shared/routeLifecycle";
 import { CSSProperties, FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
@@ -78,8 +79,6 @@ import {
   saveAdminUser,
   saveImagePricing,
   saveImageMonthlyTotal,
-  saveClientFinance,
-  registerClientPayment,
   saveRouteBillingMode,
   subscribeAdminMonitor,
   triggerAdminCloudBackup,
@@ -763,9 +762,6 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
   const [leaderDraft, setLeaderDraft] = useState<LeaderContact>({ name: "", phone: "" });
   const [notificationCenterOpen, setNotificationCenterOpen] = useState(false);
   const [usageView, setUsageView] = useState<"pending" | "history">("pending");
-  const [prepaidDrafts, setPrepaidDrafts] = useState<Record<string, string>>({});
-  const [dueDayDrafts, setDueDayDrafts] = useState<Record<string, string>>({});
-  const [routeCadenceDrafts, setRouteCadenceDrafts] = useState<Record<string, string>>({});
 
   function showToast(message: string) {
     setToast(message);
@@ -1360,54 +1356,6 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
     }
   }
 
-  async function saveFinanceSettings(clientEmail: string, action: "price" | "credits" | "due" | "cadence") {
-    setBusy(true);
-    try {
-      const payload = action === "price"
-        ? { routePriceCents: parseMoneyInput(usageAmounts[`client:${clientEmail}`] ?? ((pricingClients.find((client) => client.clientEmail === clientEmail)?.routePriceCents || 70) / 100).toFixed(2)) }
-        : action === "credits"
-          ? { prepaidRoutesRemaining: Math.max(0, Math.floor(Number(prepaidDrafts[clientEmail] ?? pricingClients.find((client) => client.clientEmail === clientEmail)?.prepaidRoutesRemaining) || 0)) }
-          : action === "due"
-            ? { dueDay: Math.max(1, Math.min(31, Math.floor(Number(dueDayDrafts[clientEmail]) || 15))) }
-            : { paymentEveryRoutes: Math.max(0, Math.min(10_000, Math.floor(Number(routeCadenceDrafts[clientEmail] ?? pricingClients.find((client) => client.clientEmail === clientEmail)?.paymentEveryRoutes) || 0))) };
-      const next = await saveClientFinance(clientEmail, payload);
-      setImageUsage(next);
-      showToast(action === "credits" ? "Quantidade de rotas antecipadas atualizada." : action === "due" ? "Vencimento atualizado." : action === "cadence" ? "Ciclo de cobrança atualizado." : "Preço por rota salvo.");
-    } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "Não consegui atualizar o financeiro.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function clearPrepaidRoutes(clientEmail: string) {
-    if (!window.confirm(`Zerar o saldo de rotas antecipadas de ${clientEmail}?`)) return;
-    setBusy(true);
-    try {
-      const next = await saveClientFinance(clientEmail, { prepaidRoutesRemaining: 0 });
-      setImageUsage(next);
-      setPrepaidDrafts((draft) => ({ ...draft, [clientEmail]: "0" }));
-      showToast("Saldo de rotas antecipadas zerado.");
-    } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "NÃ£o consegui zerar o saldo antecipado.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function markClientPaid(clientEmail: string) {
-    if (!window.confirm(`Registrar o pagamento de ${clientEmail} e zerar o saldo em aberto?`)) return;
-    setBusy(true);
-    try {
-      setImageUsage(await registerClientPayment(clientEmail));
-      showToast("Pagamento registrado; histórico preservado.");
-    } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "Não consegui registrar o pagamento.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   function requestReject(routeIds: string[], title = "Rejeitar rota") {
     setRejectRequest({ routeIds, title });
     setRejectReason("");
@@ -1608,7 +1556,7 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
   ];
 
   return (
-    <main className="adminx-shell">
+    <main className={page === "costs" ? "adminx-shell adminx-costs-view" : "adminx-shell"}>
       <aside className="adminx-sidebar">
         <div className="adminx-brand">
           <Bot size={24} />
@@ -1639,19 +1587,19 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
             <h1>{pages.find((item) => item.id === page)?.label}</h1>
           </div>
           <div className="adminx-global-filters">
-            <button className="adminx-debt-chip" type="button" onClick={() => setPage("usage")} title="Abrir controle financeiro">
+            <button className="adminx-debt-chip" type="button" onClick={() => setPage("costs")} title="Abrir controle financeiro">
               <CircleDollarSign size={19} />
               <span><small>{clientFilter === "all" ? "Total a receber" : "Cliente deve"}</small><strong>{formatMoney(visibleDebt)}</strong></span>
             </button>
-            <label>
+            {page !== "costs" ? <label>
               <Search size={17} />
               <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar cliente, grupo, análise, log..." />
-            </label>
+            </label> : null}
             <select value={clientFilter} onChange={(event) => setClientFilter(event.target.value)}>
               <option value="all">Todos os clientes</option>
               {clients.map((client) => <option key={client.email} value={client.email}>{client.email}</option>)}
             </select>
-            {page !== "reports" ? <select value={datePreset} onChange={(event) => setDatePreset(event.target.value as DatePreset)}>
+            {page !== "reports" && page !== "costs" ? <select value={datePreset} onChange={(event) => setDatePreset(event.target.value as DatePreset)}>
               <option value="today">Hoje</option>
               <option value="7d">7 dias</option>
               <option value="30d">30 dias</option>
@@ -2055,48 +2003,7 @@ export function AdminCommandCenter({ userEmail, onLogout, onEnterClientMode }: A
           </section>
         ) : null}
 
-        {page === "costs" ? (
-          <section className="adminx-page adminx-costs-page">
-            <div className="adminx-metrics">
-              <MetricCard Icon={CircleDollarSign} tone="yellow" title="Total a receber" value={formatMoney(imageUsage.totals.amountCents)} detail="somente saldo em aberto" />
-              <MetricCard Icon={Route} tone="blue" title="Rotas em aberto" value={imageUsage.totals.unpaidRoutes} detail="Target, manual e IA" />
-              <MetricCard Icon={CheckCircle2} tone="green" title="Rotas validadas" value={validatedCount} detail="histórico geral" />
-            </div>
-            <article className="adminx-panel adminx-panel-wide">
-              <div className="adminx-panel-head"><div><p>Financeiro por cliente</p><h2>Preço e ciclo de cobrança</h2></div><CircleDollarSign size={22} /></div>
-              <p className="adminx-costs-note">Toda rota validada é contabilizada. Créditos pré-pagos são consumidos primeiro; depois, o valor configurado por rota entra no saldo até o pagamento.</p>
-              <div className="adminx-costs-list">
-                {pricingClients.map((client) => (
-                  <section className="adminx-cost-client" key={client.clientEmail}>
-                    <header><div><strong>{client.clientEmail}</strong><small>{client.unpaidRoutes} rota(s) em aberto · vence todo dia {client.dueDay}</small></div><strong className="adminx-cost-balance">{formatMoney(client.amountCents)}</strong></header>
-                    <div className="adminx-cost-controls">
-                      <label><span>Valor por rota</span><input inputMode="decimal" value={usageAmounts[`client:${client.clientEmail}`] ?? (client.routePriceCents / 100).toLocaleString("pt-BR", { minimumFractionDigits: 2 })} onChange={(event) => editUsageAmount(`client:${client.clientEmail}`, event.target.value)} /></label>
-                      <button className="button primary" disabled={busy} type="button" onClick={() => saveFinanceSettings(client.clientEmail, "price")}>Salvar preço</button>
-                      <label><span>Dia de vencimento (1–31)</span><input inputMode="numeric" value={dueDayDrafts[client.clientEmail] ?? String(client.dueDay)} onChange={(event) => setDueDayDrafts((draft) => ({ ...draft, [client.clientEmail]: event.target.value }))} /></label>
-                      <button className="button" disabled={busy} type="button" onClick={() => saveFinanceSettings(client.clientEmail, "due")}>Salvar data</button>
-                      <label><span>Cobrar a cada N rotas (0 = por data)</span><input inputMode="numeric" min="0" value={routeCadenceDrafts[client.clientEmail] ?? String(client.paymentEveryRoutes)} onChange={(event) => setRouteCadenceDrafts((draft) => ({ ...draft, [client.clientEmail]: event.target.value }))} /></label>
-                      <button className="button" disabled={busy} type="button" onClick={() => saveFinanceSettings(client.clientEmail, "cadence")}>Salvar ciclo</button>
-                      <label><span>Rotas antecipadas pagas (quantidade exata)</span><input inputMode="numeric" min="0" placeholder="0" value={prepaidDrafts[client.clientEmail] ?? String(client.prepaidRoutesRemaining)} onChange={(event) => setPrepaidDrafts((draft) => ({ ...draft, [client.clientEmail]: event.target.value }))} /></label>
-                      <button className="button" disabled={busy || prepaidDrafts[client.clientEmail] === ""} type="button" onClick={() => saveFinanceSettings(client.clientEmail, "credits")}>Salvar quantidade</button>
-                      <button className="button danger" disabled={busy || client.prepaidRoutesRemaining === 0} type="button" onClick={() => clearPrepaidRoutes(client.clientEmail)}>Zerar saldo</button>
-                    </div>
-                    <footer><span>{client.prepaidRoutesRemaining} rota(s) pré-paga(s) restante(s){client.creditBalanceCents ? ` · Crédito de rotas apagadas: ${formatMoney(client.creditBalanceCents)}` : ""}</span><button className="button" disabled={busy || client.amountCents <= 0} type="button" onClick={() => markClientPaid(client.clientEmail)}>Registrar pagamento e iniciar novo período</button></footer>
-                  </section>
-                ))}
-                {!pricingClients.length ? <p className="adminx-empty-text">Nenhum cliente cadastrado.</p> : null}
-              </div>
-            </article>
-            <article className="adminx-panel adminx-panel-wide">
-              <div className="adminx-panel-head"><div><p>Livro financeiro</p><h2>Rotas e cobranças</h2></div><StatusPill tone="blue">{(imageUsage.ledgerEntries || imageUsage.entries).length} registro(s)</StatusPill></div>
-              <div className="adminx-cost-ledger">
-                {(imageUsage.ledgerEntries || imageUsage.entries).filter((entry) => (entry.decision === "billable" || entry.cancellation) && (clientFilter === "all" || entry.clientEmail === clientFilter)).map((entry) => (
-                  <div key={entry.id}><span><strong>{entry.clientEmail}</strong><small>{entry.gaiola || entry.route || entry.bairro || "Rota validada"} · {formatShort(entry.cancellation?.cancelledAt || entry.reviewedAt || entry.createdAt)} · {entry.billingSource || "imagem"}</small>{entry.cancellation ? <small>{entry.cancellation.prepaidRestored ? "Rota antecipada devolvida" : entry.cancellation.creditGrantedCents ? `Crédito devolvido: ${formatMoney(entry.cancellation.creditGrantedCents)}` : "Cobrança cancelada"}</small> : entry.creditAppliedCents ? <small>Crédito utilizado: {formatMoney(entry.creditAppliedCents)}</small> : null}</span><span>{entry.cancellation ? "Apagada · cancelada" : entry.paymentStatus === "prepaid" ? "Pré-paga" : entry.paymentStatus === "paid" ? "Pago" : "Em aberto"}</span><strong>{formatMoney(entry.cancellation ? 0 : entry.amountCents)}</strong></div>
-                ))}
-                {!(imageUsage.ledgerEntries || imageUsage.entries).some((entry) => (entry.decision === "billable" || entry.cancellation) && (clientFilter === "all" || entry.clientEmail === clientFilter)) ? <p className="adminx-empty-text">Nenhuma rota no livro financeiro.</p> : null}
-              </div>
-            </article>
-          </section>
-        ) : null}
+        {page === "costs" ? <CostsPanel usage={imageUsage} clientEmails={clients.map(client => client.email)} clientFilter={clientFilter} search="" onChange={setImageUsage} /> : null}
 
         {page === "usage" ? (
           <section className="adminx-page adminx-usage-page">

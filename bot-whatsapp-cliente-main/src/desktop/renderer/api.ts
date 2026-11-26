@@ -3,6 +3,7 @@ import {
   AdminMonitorSnapshot,
   AdminImageUsageSnapshot,
   ClientImageUsageSnapshot,
+  ClientFinanceSettings,
   AdminSupportMessagesSnapshot,
   AdminUserDetail,
   AdminUsersSnapshot,
@@ -303,7 +304,7 @@ export function saveRouteBillingMode(clientEmail: string, enabled: boolean) {
   });
 }
 
-export function saveClientFinance(clientEmail: string, payload: { routePriceCents?: number; dueDay?: number; prepaidRoutesRemaining?: number; paymentEveryRoutes?: number }) {
+export function saveClientFinance(clientEmail: string, payload: ClientFinanceSettings) {
   return fetchJson<AdminImageUsageSnapshot>(`/api/admin/client-finance/${encodeURIComponent(clientEmail)}`, {
     method: "PATCH",
     body: JSON.stringify(payload)

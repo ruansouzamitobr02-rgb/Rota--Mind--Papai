@@ -107,6 +107,7 @@ export function ClientDebtNotice({ usage, suppressed, accountEmail }: {
         <p className="client-debt-eyebrow">Um lembrete sobre seu acerto</p>
         <h2 id="client-debt-title">Você tem um pagamento pendente</h2>
         <div className="client-debt-amount"><small>Seu saldo em aberto</small><strong>{money(finance!.amountCents)}</strong></div>
+        {finance!.dailyLateFeeCents ? <div className="client-debt-breakdown"><span>Saldo combinado <b>{money(finance!.principalCents || 0)}</b></span><span>Taxa de atraso · {finance!.daysOverdue || 0} dia(s) <b>{money(finance!.lateFeeCents || 0)}</b></span><small>Após o vencimento: R$ 1,00 de taxa por dia enquanto houver saldo em aberto.</small></div> : null}
         <p id="client-debt-description">{finance!.paymentEveryRoutes
           ? `Seu ciclo de ${finance!.paymentEveryRoutes} rotas foi atingido.`
           : `O pagamento venceu em ${new Date(finance!.dueDate!).toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" })}.`}
