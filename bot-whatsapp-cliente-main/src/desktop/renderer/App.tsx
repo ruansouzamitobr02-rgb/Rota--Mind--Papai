@@ -58,6 +58,7 @@ import {
 import { ControlButtons } from "./components/ControlButtons";
 import { GroupMessageCard } from "./components/GroupMessageCard";
 import { AnalysisImage } from "./components/AnalysisImage";
+import { ClientDebtNotice } from "./components/ClientDebtNotice";
 import { LogsPanel } from "./components/LogsPanel";
 import { QrCodeBox } from "./components/QrCodeBox";
 import { SettingsPanel } from "./components/SettingsPanel";
@@ -3627,7 +3628,8 @@ function PanelApp() {
           <strong>{snapshot.monitoringMode === "test" ? testGroupLabel : groupLabel}</strong>
         </div>
       </section>
-      {snapshot.imageUsage?.billingReminder ? (
+      <ClientDebtNotice key={userEmail} accountEmail={userEmail} usage={snapshot.imageUsage} suppressed={Boolean(snapshot.monitoringEnabled || busy || automaticOcrAnalysisOpen || pendingClientIncident)} />
+      {snapshot.imageUsage?.billingReminder && !snapshot.imageUsage.overdue && !snapshot.monitoringEnabled ? (
         <section className="client-billing-reminder" role="status">
           <CircleDollarSign size={18} />
           <span><strong>Lembrete de pagamento</strong><small>{snapshot.imageUsage.billingReminder}</small></span>

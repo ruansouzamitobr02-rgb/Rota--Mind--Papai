@@ -9571,3 +9571,30 @@ body,
   .adminx-cost-controls { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
   .adminx-cost-client header, .adminx-cost-client footer { align-items: flex-start; flex-direction: column; }
 }
+
+/* Overdue accounts keep a quiet amber edge; reminders never cover an armed bot. */
+.client-debt-frame { position: fixed; inset: 0; z-index: 35; pointer-events: none; border: 2px solid #e5a333; border-radius: 16px; box-shadow: inset 0 0 30px rgba(229,163,51,.12); }
+.client-debt-banner { display: flex; align-items: center; gap: 12px; padding: 12px 16px; margin: 0 0 16px; border: 1px solid #825c2e; border-radius: 15px; color: #ffd89a; background: linear-gradient(100deg,#302315,#15121b); }
+.client-debt-banner > span { display: grid; flex: 1; gap: 3px; }
+.client-debt-banner small { color: #ddc6a3; }
+.client-debt-banner .button { padding: 9px 12px; min-height: 38px; color: #ffe1ad; border-color: #785731; }
+.client-debt-backdrop { z-index: 12000; background: rgba(6,5,12,.82); backdrop-filter: blur(9px); padding: max(18px,env(safe-area-inset-top)) 18px max(18px,env(safe-area-inset-bottom)); }
+.client-debt-backdrop, .client-debt-backdrop > .client-debt-dialog[role="dialog"] { animation: none !important; opacity: 1; }
+.client-debt-dialog { position: relative; width: min(100%,460px); max-height: 90dvh; overflow: auto; padding: 32px; border: 1px solid #795635; border-radius: 26px; background: radial-gradient(ellipse at top,#38261c 0,#15111e 48%,#0b0a11 100%); box-shadow: 0 24px 90px #0009; text-align: center; }
+.modal-backdrop.client-debt-backdrop > .client-debt-dialog[role="dialog"] { border-color: #795635 !important; background: radial-gradient(ellipse at top,#38261c 0,#15111e 48%,#0b0a11 100%) !important; box-shadow: 0 24px 90px #0009 !important; }
+.client-debt-close { position: absolute; right: 14px; top: 14px; color: #e7d3b2; }
+.client-debt-icon { display: grid; place-items: center; margin: 0 auto 18px; width: 65px; height: 65px; border-radius: 20px; color: #ffc570; background: #8e5a222f; border: 1px solid #946535; }
+.client-debt-eyebrow { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: #f4bd72; }
+.client-debt-dialog h2 { margin: 12px 0 22px; font-size: clamp(23px,6vw,29px); line-height: 1.18; color: #fff4e4; }
+.client-debt-amount { display: grid; gap: 7px; padding: 20px; background: #08070d77; border: 1px solid #604429; border-radius: 18px; }
+.client-debt-amount small { color: #c9baa4; }
+.client-debt-amount strong { font-size: clamp(31px,9vw,42px); color: #ffd396; letter-spacing: -.04em; }
+.client-debt-dialog > p:not(.client-debt-eyebrow) { color: #d6c8ba; font-size: 14px; line-height: 1.6; }
+.client-debt-note { display: flex; gap: 9px; padding: 13px; margin: 18px 0; border-radius: 12px; background: #f2b85a0a; text-align: left; font-size: 12px; line-height: 1.5; color: #e4cfad; }
+.client-debt-note svg { flex-shrink: 0; margin-top: 2px; }
+.client-debt-dialog > .button { width: 100%; justify-content: center; margin: 0 0 10px; min-height: 46px; }
+.client-debt-later { color: #22190f; background: #f3bf79; border-color: #f3bf79; font-weight: 700; }
+.client-debt-refresh { color: #ead2b5; background: transparent; border-color: #52422f; }
+.client-debt-confirmation { display: block; color: #a99d91; font-size: 11px; line-height: 1.5; }
+.client-debt-feedback { font-size: 12px !important; margin-bottom: 0; }
+@media (max-width:480px) { .client-debt-dialog { padding: 28px 20px 22px; border-radius: 22px; } }

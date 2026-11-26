@@ -346,6 +346,9 @@ export type ClientImageUsageSnapshot = {
   dueDay: number;
   dueDate?: string;
   daysUntilDue?: number;
+  overdue?: boolean;
+  daysOverdue?: number;
+  paymentEveryRoutes?: number;
   billingReminder?: string;
   latestNotice?: { id: string; text: string };
 };

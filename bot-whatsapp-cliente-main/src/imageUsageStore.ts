@@ -2,6 +2,7 @@ import { writeJsonAtomic } from "./storageJson";
 import fs from "fs";
 import { AdminImageUsageSnapshot, ClientImageUsageSnapshot, ImageAnalysisResult, ImageUsageDecision, ImageUsageEntry, RouteDispatch } from "./shared/types";
 import { isRouteDeleted, routeDeletedAt } from "./shared/routeLifecycle";
+import { getBillingDeadline } from "./shared/billingDeadline";
 type StoredImageUsage = {
   entries: ImageUsageEntry[];
   defaultAmounts: Record<string, number>;
@@ -340,14 +341,18 @@ export class ImageUsageStore {
     };
   }
 
-  clientSnapshot(clientEmail: string, month = this.currentMonth()): ClientImageUsageSnapshot {
+  clientSnapshot(clientEmail: string, month = this.currentMonth(), now = new Date()): ClientImageUsageSnapshot {
     const email = clientEmail.trim().toLowerCase();
     const allEntries = this.data.entries.filter((entry) => entry.clientEmail === email);
     const entries = allEntries.filter((entry) => entry.createdAt.slice(0, 7) === month);
     const unpaid = allEntries.filter((entry) => entry.decision === "billable" && (entry.paymentStatus || "unpaid") === "unpaid");
-    const nextDue = this.nextDueDate(email, new Date());
-    const daysUntilDue = Math.max(0, Math.ceil((nextDue.getTime() - Date.now()) / 86_400_000));
+    const firstUnpaidAt = unpaid.map(entry => entry.reviewedAt || entry.createdAt).filter(value => Number.isFinite(Date.parse(value))).sort()[0];
+    const deadline = getBillingDeadline(this.dueDay(email), now, firstUnpaidAt, this.data.lastPayments[email]);
+    const nextDue = new Date(deadline.dueDate);
+    const { daysUntilDue, daysOverdue } = deadline;
     const amountCents = this.payableBalance(email, month);
+    const paymentEveryRoutes = this.paymentEveryRoutes(email);
+    const overdue = amountCents > 0 && (paymentEveryRoutes > 0 ? unpaid.length >= paymentEveryRoutes : daysOverdue > 0);
     const latestRoute = allEntries.filter((entry) => entry.decision === "billable" && entry.routeDispatchId)
       .sort((left, right) => Date.parse(right.reviewedAt || right.updatedAt) - Date.parse(left.reviewedAt || left.updatedAt))[0];
     const latestNoticeText = latestRoute
@@ -362,8 +367,13 @@ export class ImageUsageStore {
       dueDay: this.dueDay(email),
       dueDate: nextDue.toISOString(),
       daysUntilDue,
+      overdue,
+      daysOverdue: paymentEveryRoutes > 0 ? 0 : daysOverdue,
+      paymentEveryRoutes,
       latestNotice: latestRoute && latestNoticeText ? { id: latestRoute.routeDispatchId!, text: latestNoticeText } : undefined,
-      billingReminder: this.paymentEveryRoutes(email) > 0
+      billingReminder: overdue && paymentEveryRoutes === 0
+        ? `Pagamento pendente: ${(amountCents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}. Regularize seu saldo com o administrador.`
+        : this.paymentEveryRoutes(email) > 0
         ? unpaid.length >= this.paymentEveryRoutes(email)
           ? `${unpaid.length} rota(s) confirmadas desde o último pagamento. Ciclo de ${this.paymentEveryRoutes(email)} rotas: saldo atual ${(amountCents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}.`
           : undefined
@@ -454,17 +464,6 @@ export class ImageUsageStore {
   setPaymentEveryRoutes(clientEmail: string, quantity: number) {
     this.data.paymentEveryRoutes[clientEmail.trim().toLowerCase()] = Math.max(0, Math.min(10_000, Math.floor(quantity)));
     this.save();
-  }
-
-  private nextDueDate(clientEmail: string, now: Date) {
-    const day = this.dueDay(clientEmail);
-    const dateForMonth = (year: number, month: number) => {
-      const lastDay = new Date(year, month + 1, 0).getDate();
-      return new Date(year, month, Math.min(day, lastDay), 23, 59, 59, 999);
-    };
-    let due = dateForMonth(now.getFullYear(), now.getMonth());
-    if (due.getTime() <= now.getTime()) due = dateForMonth(now.getFullYear(), now.getMonth() + 1);
-    return due;
   }
 
   private monthlyTotalKey(clientEmail: string, month: string) {

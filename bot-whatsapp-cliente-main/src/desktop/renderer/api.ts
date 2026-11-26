@@ -2,6 +2,7 @@ import {
   AdminRoutesSnapshot,
   AdminMonitorSnapshot,
   AdminImageUsageSnapshot,
+  ClientImageUsageSnapshot,
   AdminSupportMessagesSnapshot,
   AdminUserDetail,
   AdminUsersSnapshot,
@@ -314,6 +315,10 @@ export function registerClientPayment(clientEmail: string) {
     method: "POST",
     body: JSON.stringify({})
   });
+}
+
+export function getClientBillingStatus(signal?: AbortSignal) {
+  return fetchJson<ClientImageUsageSnapshot>("/api/billing/status", { signal });
 }
 
 export function subscribeAdminMonitor(callback: (snapshot: AdminMonitorSnapshot) => void, onError?: (error?: unknown) => void) {

@@ -1049,6 +1049,8 @@ const financeReminderSent = new Map<string, string>();
 function notifyClientsAboutUpcomingPayments() {
   const today = new Date().toISOString().slice(0, 10);
   for (const email of getClientEmails()) {
+    const activeBot = bots.get(email);
+    if (activeBot && (activeBot.getSnapshot().monitoringEnabled || activeBot.isCriticalDispatchActive())) continue;
     const finance = imageUsageStore.clientSnapshot(email);
     if (!finance.billingReminder || !finance.dueDate) continue;
     const reminderKey = `${finance.dueDate.slice(0, 10)}:${today}`;
@@ -1544,6 +1546,11 @@ const server = http.createServer(async (request, response) => {
         color: panelUsers.get(authorizedEmail)?.color,
         impersonatedBy: session?.email === authorizedEmail ? session.impersonatedBy : undefined
       });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/billing/status") {
+      sendJson(response, 200, imageUsageStore.clientSnapshot(authorizedEmail));
       return;
     }
 
