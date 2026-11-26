@@ -2719,12 +2719,9 @@ export class BotService extends EventEmitter {
       // perfil dedicado, Sharp trabalha em paralelo enquanto o OCR lê a foto.
       previewPromise = (async () => {
         try {
-          const { default: sharp } = await import("sharp");
-          const preview = await sharp(imagePaths[0]).rotate().resize({ width: 960, withoutEnlargement: true })
-            .jpeg({ quality: 60, mozjpeg: true }).toBuffer();
-          imagePreviewUrl = `data:image/jpeg;base64,${preview.toString("base64")}`;
-          this.ocrRouteSelection = { ...this.ocrRouteSelection, imagePreviewUrl };
-          this.emitSnapshot();
+          imagePreviewUrl = await this.createRouteImagePreview(imagePaths[0]);
+          const completedPreview = imagePreviewUrl;
+          this.deferSecondarySocketTask(() => this.publishRouteImagePreview(analysisId, sequence, completedPreview));
         } catch (error) {
           this.logger.warning(`Não consegui gerar a prévia da imagem: ${this.getErrorMessage(error)}`);
         }
@@ -2763,7 +2760,6 @@ export class BotService extends EventEmitter {
         ocr = combineRouteImageBatch(readings);
         decision = selectPreferredNeighborhoodFromOcr(ocr, preferences, config.ocrMaxStops, config.ocrMaxPackages, config.ocrRouteChoiceMode, config.ocrRouteChoiceMetric);
       }
-      await previewPromise;
       const ocrFinishedAtMs = Date.now();
       const comparedAt = Date.now();
       const timing = {
@@ -2875,6 +2871,7 @@ export class BotService extends EventEmitter {
     } finally {
       if (analysisWatchdog) clearTimeout(analysisWatchdog);
       await previewPromise;
+      if (imagePreviewUrl && !this.criticalDispatchInProgress) this.publishRouteImagePreview(analysisId, sequence, imagePreviewUrl);
       if (!dispatchRaceReady || !isCurrent()) reportState("unavailable");
       if (sequence === this.latestRouteImageSequence) {
         this.ocrAnalysisDurationsMs = [...this.ocrAnalysisDurationsMs, Date.now() - analysisStartedAtMs].slice(-10);
@@ -2889,6 +2886,28 @@ export class BotService extends EventEmitter {
         }
       }
     }
+  }
+
+  private async createRouteImagePreview(imagePath: string) {
+    const { default: sharp } = await import("sharp");
+    const preview = await sharp(imagePath).rotate().resize({ width: 960, withoutEnlargement: true })
+      .jpeg({ quality: 60, mozjpeg: true }).toBuffer();
+    return `data:image/jpeg;base64,${preview.toString("base64")}`;
+  }
+
+  private publishRouteImagePreview(analysisId: string, sequence: number, imagePreviewUrl: string) {
+    if (this.stopping) return;
+    // A slow preview belongs to its own analysis, even after another photo or
+    // a confirmed send has replaced the current state. It must never alter a
+    // newer analysis, nor delay the first relay while the image is encoded.
+    if (sequence === this.latestRouteImageSequence && this.ocrRouteSelection.analysisId === analysisId && this.ocrRouteSelection.imagePreviewUrl !== imagePreviewUrl) {
+      this.ocrRouteSelection = { ...this.ocrRouteSelection, imagePreviewUrl };
+      this.rememberCurrentOcrAnalysis();
+    }
+    if (this.lastOcrInsight?.analysisId === analysisId) this.lastOcrInsight = { ...this.lastOcrInsight, imagePreviewUrl };
+    this.ocrAnalysisHistoryStore.setAnalysisPreview(analysisId, imagePreviewUrl);
+    this.routeStore.setAnalysisPreview(analysisId, imagePreviewUrl);
+    this.emitSnapshot();
   }
 
   async confirmOcrRouteSelection(optionIds: string[]) {
@@ -5045,12 +5064,21 @@ export class BotService extends EventEmitter {
   }
 
   private deferSecondarySocketTask(task: () => void) {
+    const run = () => {
+      if (this.criticalDispatchInProgress) {
+        const retry = setTimeout(run, 50);
+        retry.unref?.();
+        return;
+      }
+      try { task(); }
+      catch (error) { this.logger.warning(`Tarefa secundária adiada após erro: ${this.getErrorMessage(error)}`); }
+    };
     if (this.criticalDispatchInProgress || (this.monitoringEnabled && this.monitoringMode === "target")) {
-      const timer = setTimeout(task, this.criticalDispatchInProgress ? 1500 : 150);
+      const timer = setTimeout(run, this.criticalDispatchInProgress ? 50 : 150);
       timer.unref?.();
       return;
     }
-    setImmediate(task);
+    setImmediate(run);
   }
 
   isCriticalDispatchActive() {

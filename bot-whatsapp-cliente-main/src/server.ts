@@ -25,6 +25,7 @@ import { getCurrentRelease, shouldShowCurrentReleaseToClients } from "./releaseN
 import { RomaneioStore } from "./services/romaneio/romaneioStore";
 import { computeConditionalDispatchBlockers, computeConditionalDispatchPriorities, ConditionalPriorityClient } from "./services/conditionalDispatchPriority";
 import { DispatchRaceCoordinator } from "./services/dispatchRaceCoordinator";
+import { getOcrRuntimeBudget } from "./services/runtimeCapacity";
 import { applyPreparedCloudRestore, completeCloudRestoreOnStartup, createPortableEncryptedArchive, discardPreparedCloudRestore, extractEncryptedArchive, getCloudBackupStatus, getCloudRestoreStatus, listCloudBackupObjects, prepareCloudRestore, recoverInterruptedCloudRestore, runCloudBackup, setCloudRestoreStatus, startCloudBackup, stopCloudBackup } from "./services/cloudBackup";
 import { getRestoreStorageStatus, inspectRestoreSnapshot } from "./services/restoreIntegrity";
 import { AdminLogEntry, AdminMonitorSnapshot, AdminRoutesSnapshot, AdminSupportMessagesSnapshot, AdminUserDetail, AdminUsersSnapshot, BotSnapshot, DispatchMatchupRule, LeaderContact, PanelUserRole, RouteDispatch, UserPresenceStatus } from "./shared/types";
@@ -1434,7 +1435,7 @@ const server = http.createServer(async (request, response) => {
     response.setHeader("Referrer-Policy", "no-referrer");
     response.setHeader("X-Frame-Options", "DENY");
     if (request.method === "GET" && url.pathname === "/api/ping") {
-      sendJson(response, 200, { ok: true, protected: Boolean(panelUsers.size), login: "email", release: currentRelease.id, version: currentRelease.version, restoreVerification: true });
+      sendJson(response, 200, { ok: true, protected: Boolean(panelUsers.size), login: "email", release: currentRelease.id, version: currentRelease.version, restoreVerification: true, performance: getOcrRuntimeBudget() });
       return;
     }
 
@@ -2358,6 +2359,8 @@ server.listen(port, "0.0.0.0", () => {
     console.log(`Na rede local: ${address}`);
   }
   console.log(`Dados persistentes: ${dataDir}`);
+  const budget = getOcrRuntimeBudget();
+  console.log(`Capacidade operacional: ${budget.cpuLimit} CPU(s), ${budget.memoryMb} MB; ${budget.imageConcurrency} imagem(ns), até ${budget.cpuSlots} leitor(es) pesados compartilhados.`);
   console.log(`Versão publicada: ${currentRelease.id}`);
   if (!panelUsers.size) {
     console.log("Aviso: defina PANEL_USERS e PANEL_ADMIN_EMAILS no Render para liberar e proteger o painel publico.");

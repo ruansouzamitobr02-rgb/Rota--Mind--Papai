@@ -15,6 +15,7 @@
     "build": "tsc && vite build",
     "build:main": "tsc",
     "typecheck": "tsc --noEmit",
+    "bench:operational": "npm run build:main && node scripts/benchmark-operational.cjs",
     "test": "npm run build:main && node --test tests/*.test.js",
     "verify": "npm run build && npm run build:main && node --test tests/*.test.js && npm audit --omit=dev",
     "desktop:build": "npm run build && electron-builder --win",

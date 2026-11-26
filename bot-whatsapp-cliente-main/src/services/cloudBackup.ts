@@ -113,7 +113,7 @@ function shouldSkip(relativePath: string, isDirectory: boolean) {
     || segment.startsWith(".cloud-restore-"))) return true;
   const name = segments[segments.length - 1] || "";
   if (name === ".cloud-restore-status.json" || name === ".cloud-restore-status.json.tmp") return true;
-  if (/^ocr-global-.*\.lock$/i.test(name) || /\.tmp$/i.test(name)) return true;
+  if (/^ocr-(?:global|cpu)-.*\.lock$/i.test(name) || /\.tmp$/i.test(name)) return true;
   if (!isDirectory && /(?:^|\/)cloud-backup\.(?:tar\.gz|enc)$/i.test(relativePath)) return true;
   return false;
 }

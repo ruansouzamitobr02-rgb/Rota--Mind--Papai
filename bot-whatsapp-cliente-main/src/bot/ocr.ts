@@ -4,6 +4,8 @@ import os from "os";
 import path from "path";
 import { createWorker } from "tesseract.js";
 import { MonitoredRoute, RomaneioRouteSummary } from "../shared/types";
+import { acquireGlobalOcrCpu } from "./ocrGlobalLock";
+import { getOcrRuntimeBudget } from "../services/runtimeCapacity";
 
 type OcrWord = {
   text: string;
@@ -53,10 +55,9 @@ let tesseractJsWorkerPromise: ReturnType<typeof createWorker> | undefined;
 let tesseractJsRecognitionQueue: Promise<void> = Promise.resolve();
 let nativeTesseractAvailable: boolean | undefined;
 const OCR_TURBO_MODE = process.env.OCR_TURBO_MODE === "true";
-const OCR_VARIANT_CONCURRENCY = Math.max(1, Math.min(5,
-  Number.parseInt(process.env.OCR_VARIANT_CONCURRENCY || (OCR_TURBO_MODE ? "4" : "3"), 10) || 3
-));
+const OCR_VARIANT_CONCURRENCY = getOcrRuntimeBudget().variantConcurrency;
 const OCR_FALLBACK_BATCH_SIZE = OCR_TURBO_MODE ? 2 : 1;
+type PreparedOcrVariant = { path: string; label: string; generated: boolean; psm: number; prepare?: () => Promise<unknown> };
 
 export function normalizeOcrText(text: string) {
   return text
@@ -77,7 +78,7 @@ export async function readRouteImageOcr(imagePath: string, options: { maxReading
 
   try {
     if (options.fastFirst && options.preferCageCrop) {
-      const cageVariants = await createPreprocessedImages(imagePath, true, "cage");
+      const cageVariants = await createPreprocessedImages(imagePath, true, "cage", undefined, true);
       variants.push(...cageVariants);
       const maxReadings = Math.max(1, options.maxReadings || 6);
       const firstVariants = cageVariants.slice(0, Math.min(2, maxReadings));
@@ -99,7 +100,7 @@ export async function readRouteImageOcr(imagePath: string, options: { maxReading
       let errors = [...firstErrors, ...extraCageAttempts.flatMap((attempt) => attempt.error ? [attempt.error] : [])];
       const fullReadingLimit = remainingLimit - extraCageVariants.length;
       if (fullReadingLimit > 0) {
-        const fullVariants = await createPreprocessedImages(imagePath, false, "full", fullReadingLimit);
+        const fullVariants = await createPreprocessedImages(imagePath, false, "full", fullReadingLimit, true);
         variants.push(...fullVariants);
         const fullAttempts = await runOcrVariants(fullVariants.slice(0, fullReadingLimit));
         readings = [...readings, ...fullAttempts.flatMap((attempt) => attempt.reading ? [attempt.reading] : [])];
@@ -109,7 +110,7 @@ export async function readRouteImageOcr(imagePath: string, options: { maxReading
       return combineOcrReadings(readings);
     }
 
-    variants.push(...await createPreprocessedImages(imagePath, options.preferCageCrop, "all", options.maxReadings));
+    variants.push(...await createPreprocessedImages(imagePath, options.preferCageCrop, "all", options.maxReadings, true));
     const maxReadings = Math.max(1, Math.min(variants.length, options.maxReadings || variants.length));
     const selectedVariants = variants.slice(0, maxReadings);
     const fastReadingCount = options.fastFirst ? Math.min(2, selectedVariants.length) : selectedVariants.length;
@@ -152,6 +153,7 @@ export async function readRouteImageOcr(imagePath: string, options: { maxReading
 function runOcrVariants(items: Awaited<ReturnType<typeof createPreprocessedImages>>) {
   return mapWithConcurrency(items, OCR_VARIANT_CONCURRENCY, async (variant) => {
     try {
+      await variant.prepare?.();
       return { reading: await readSingleRouteImageOcr(variant.path, variant.label, variant.psm) };
     } catch (error) {
       return { error: error instanceof Error ? error.message : String(error) };
@@ -341,66 +343,73 @@ export async function readCageOcrWithFallback(
   }
 }
 
-function readRouteImageOcrWithBinary(imagePath: string, label: string, psm: number) {
-  return new Promise<RouteOcrResult>((resolve, reject) => {
-    if (nativeTesseractAvailable === false) {
-      reject(new Error("Tesseract nativo indisponível; usando o motor JavaScript."));
-      return;
-    }
-    const cageOnly = label.startsWith("coluna-gaiola");
-    const cageOptions = cageOnly
-      ? ["-c", "tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"]
-      : [];
-    const commandArgs = [imagePath, "stdout", "-l", cageOnly ? "eng" : "por", "--oem", "1", "--psm", String(psm), ...cageOptions, "tsv"];
-    execFile(
-      "tesseract",
-      commandArgs,
-      { timeout: 15000, maxBuffer: 1024 * 1024 * 4 },
-      (error, stdout, stderr) => {
-        if (error) {
-          if ((error as NodeJS.ErrnoException).code === "ENOENT") nativeTesseractAvailable = false;
-          const failure = new Error(stderr?.trim() || error.message) as NodeJS.ErrnoException;
-          failure.code = (error as NodeJS.ErrnoException).code;
-          reject(failure);
-          return;
-        }
-
-        nativeTesseractAvailable = true;
-        const lines = parseTsvLines(stdout || "");
-        resolve({
-          text: lines.map((line) => line.text).join("\n"),
-          lines,
-          source: `tesseract-binary:${label}`
-        });
+async function readRouteImageOcrWithBinary(imagePath: string, label: string, psm: number) {
+  if (nativeTesseractAvailable === false) throw new Error("Tesseract nativo indisponível; usando o motor JavaScript.");
+  const releaseCpu = await acquireGlobalOcrCpu();
+  try {
+    return await new Promise<RouteOcrResult>((resolve, reject) => {
+      if (nativeTesseractAvailable === false) {
+        reject(new Error("Tesseract nativo indisponível; usando o motor JavaScript."));
+        return;
       }
-    );
-  });
+      const cageOnly = label.startsWith("coluna-gaiola");
+      const cageOptions = cageOnly
+        ? ["-c", "tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"]
+        : [];
+      const commandArgs = [imagePath, "stdout", "-l", cageOnly ? "eng" : "por", "--oem", "1", "--psm", String(psm), ...cageOptions, "tsv"];
+      execFile(
+        "tesseract",
+        commandArgs,
+        { timeout: 15000, maxBuffer: 1024 * 1024 * 4, windowsHide: true, env: { ...process.env, OMP_THREAD_LIMIT: "1", OMP_NUM_THREADS: "1" } },
+        (error, stdout, stderr) => {
+          if (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") nativeTesseractAvailable = false;
+            const failure = new Error(stderr?.trim() || error.message) as NodeJS.ErrnoException;
+            failure.code = (error as NodeJS.ErrnoException).code;
+            reject(failure);
+            return;
+          }
+
+          nativeTesseractAvailable = true;
+          const lines = parseTsvLines(stdout || "");
+          resolve({
+            text: lines.map((line) => line.text).join("\n"),
+            lines,
+            source: `tesseract-binary:${label}`
+          });
+        }
+      );
+    });
+  } finally { await releaseCpu(); }
 }
 
 function readRouteImageOcrWithTesseractJs(imagePath: string, label: string, psm: number): Promise<RouteOcrResult> {
   const recognize = async (): Promise<RouteOcrResult> => {
-    const cageOnly = label.startsWith("coluna-gaiola");
-    const worker = await getTesseractJsWorker(cageOnly);
-    await worker.setParameters({
-      tessedit_pageseg_mode: String(psm) as any
-    });
+    const releaseCpu = await acquireGlobalOcrCpu();
+    try {
+      const cageOnly = label.startsWith("coluna-gaiola");
+      const worker = await getTesseractJsWorker(cageOnly);
+      await worker.setParameters({
+        tessedit_pageseg_mode: String(psm) as any
+      });
 
-    const result = await worker.recognize(
-      imagePath,
-      {},
-      {
-        text: true,
-        blocks: true,
-        tsv: true
-      }
-    );
-    const tsvLines = parseTsvLines(result.data.tsv || "");
-    const blockLines = tsvLines.length ? tsvLines : extractBlockLines(result.data.blocks || []);
-    return {
-      text: blockLines.map((line) => line.text).join("\n") || result.data.text || "",
-      lines: blockLines,
-      source: `tesseract-js:${label}`
-    };
+      const result = await worker.recognize(
+        imagePath,
+        {},
+        {
+          text: true,
+          blocks: true,
+          tsv: true
+        }
+      );
+      const tsvLines = parseTsvLines(result.data.tsv || "");
+      const blockLines = tsvLines.length ? tsvLines : extractBlockLines(result.data.blocks || []);
+      return {
+        text: blockLines.map((line) => line.text).join("\n") || result.data.text || "",
+        lines: blockLines,
+        source: `tesseract-js:${label}`
+      };
+    } finally { await releaseCpu(); }
   };
   const pending = tesseractJsRecognitionQueue.then(recognize, recognize);
   tesseractJsRecognitionQueue = pending.then(() => undefined, () => undefined);
@@ -442,7 +451,7 @@ async function detectRouteImageLayoutPreset(imagePath: string, sharp: any, meanL
   }
 }
 
-async function createPreprocessedImages(imagePath: string, preferCageCrop = false, mode: "all" | "cage" | "full" = "all", maxVariants?: number) {
+export async function createPreprocessedImages(imagePath: string, preferCageCrop = false, mode: "all" | "cage" | "full" = "all", maxVariants?: number, lazy = false): Promise<PreparedOcrVariant[]> {
   const generatedPaths: string[] = [];
   try {
     const { default: sharp } = await import("sharp");
@@ -503,8 +512,7 @@ async function createPreprocessedImages(imagePath: string, preferCageCrop = fals
         [invertedBinary, async () => sharp(await normalizedDarkInput())
           .threshold(180).extend({ top: 16, bottom: 16, left: 16, right: 16, background: "white" }).png().toFile(invertedBinary)]
       ]);
-      await Promise.all([...selectedPaths].map((selectedPath) => jobs.get(selectedPath)!()));
-      return selectedVariants;
+      return await materializeVariants(selectedVariants, jobs, lazy);
     }
     const resizeWidth = width > 0 ? Math.min(3200, Math.max(1800, width * 2)) : 2200;
     const baseName = path.join(os.tmpdir(), `ocr-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -585,10 +593,6 @@ async function createPreprocessedImages(imagePath: string, preferCageCrop = fals
     ];
     if (mode !== "cage") generatedPaths.push(enhancedPath, thresholdPath);
     if (mode !== "full") generatedPaths.push(cageEnhancedPath, cageSoftPath, cageCompactPath, cageOriginalPath);
-    await Promise.all([
-      ...(mode !== "cage" ? fullJobs.map((job) => job()) : []),
-      ...(mode !== "full" ? cageJobs.map((job) => job()) : [])
-    ]);
 
     const fullTableVariants = [
       { path: enhancedPath, label: `rota-at-${layoutPreset}-contraste`, generated: true, psm: 6 },
@@ -604,9 +608,7 @@ async function createPreprocessedImages(imagePath: string, preferCageCrop = fals
     const originalVariant = [
       { path: imagePath, label: "original", generated: false, psm: 11 }
     ];
-    if (mode === "cage") return cageColumnVariants;
-    if (mode === "full") return [...fullTableVariants, ...originalVariant];
-    return preferCageCrop
+    const selected = mode === "cage" ? cageColumnVariants : mode === "full" ? [...fullTableVariants, ...originalVariant] : preferCageCrop
       ? [...cageColumnVariants, ...fullTableVariants, ...originalVariant]
       : [
           // Perfil rápido comprovado no layout novo: texto esparso completo,
@@ -621,6 +623,12 @@ async function createPreprocessedImages(imagePath: string, preferCageCrop = fals
           cageColumnVariants[3],
           ...originalVariant
         ];
+    const jobs = new Map<string, () => Promise<unknown>>([
+      [enhancedPath, fullJobs[0]], [thresholdPath, fullJobs[1]],
+      [cageEnhancedPath, cageJobs[0]], [cageSoftPath, cageJobs[1]],
+      [cageCompactPath, cageJobs[2]], [cageOriginalPath, cageJobs[3]]
+    ]);
+    return await materializeVariants(selected.slice(0, Math.max(1, maxVariants || selected.length)), jobs, lazy);
   } catch {
     for (const generatedPath of generatedPaths) {
       try {
@@ -631,6 +639,23 @@ async function createPreprocessedImages(imagePath: string, preferCageCrop = fals
     }
     return [{ path: imagePath, label: "original", generated: false, psm: 6 }];
   }
+}
+
+async function materializeVariants(variants: PreparedOcrVariant[], jobs: Map<string, () => Promise<unknown>>, lazy: boolean) {
+  const pending = new Map<string, Promise<unknown>>();
+  const prepare = (file: string) => {
+    let task = pending.get(file);
+    if (!task) { task = Promise.resolve().then(() => jobs.get(file)?.()); pending.set(file, task); }
+    return task;
+  };
+  const prepared = variants.map(variant => ({ ...variant, prepare: () => prepare(variant.path) }));
+  if (!lazy) {
+    // Wait for every started writer before fallback/cleanup, including errors.
+    const settled = await Promise.allSettled(prepared.map(variant => variant.prepare()));
+    const failure = settled.find(item => item.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
+  }
+  return prepared;
 }
 
 function getTesseractJsWorker(_cageOnly = false) {
@@ -649,7 +674,8 @@ function getTesseractJsWorker(_cageOnly = false) {
 }
 
 export async function warmupRouteOcrEngine() {
-  await getTesseractJsWorker();
+  const releaseCpu = await acquireGlobalOcrCpu();
+  try { await getTesseractJsWorker(); } finally { await releaseCpu(); }
 }
 
 export async function shutdownRouteOcrEngine() {

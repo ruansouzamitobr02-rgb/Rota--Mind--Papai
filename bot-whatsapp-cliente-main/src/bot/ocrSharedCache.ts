@@ -2,6 +2,7 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import type { RouteOcrResult } from "./ocr";
+import { waitForOcrPoolSignal } from "./ocrPoolSignal";
 
 export type SharedOcrOptions = {
   maxReadings?: number;
@@ -174,7 +175,7 @@ async function acquireKeyLock(lockPath: string) {
     } catch (error: any) {
       if (error?.code !== "EEXIST") throw error;
       if (await isAbandonedLock(lockPath)) await fs.promises.unlink(lockPath).catch(() => undefined);
-      else await delay(POLL_INTERVAL_MS);
+      else await waitForOcrPoolSignal(path.dirname(lockPath), name => name === path.basename(lockPath), POLL_INTERVAL_MS);
     }
   }
 
@@ -239,8 +240,4 @@ async function cleanupCache(cacheDir: string, ttlMs: number, maxEntries: number)
 function parsePositiveInteger(value: string | undefined, fallback: number) {
   const parsed = Number.parseInt(String(value || ""), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function delay(ms: number) {
-  return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }

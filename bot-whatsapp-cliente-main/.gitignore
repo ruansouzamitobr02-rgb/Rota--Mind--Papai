@@ -38,3 +38,5 @@ __pycache__/
 .env.*
 !.env.example
 .panel-password-key
+ocr-global-*.lock
+ocr-cpu-*.lock

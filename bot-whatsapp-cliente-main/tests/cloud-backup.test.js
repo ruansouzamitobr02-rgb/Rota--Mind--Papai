@@ -20,6 +20,7 @@ test("backup criptografado compacta os dados persistentes e exclui cache descart
   sessionDb.pragma("journal_mode = WAL");
   sessionDb.exec("CREATE TABLE session_data (value TEXT); INSERT INTO session_data VALUES ('sessao whatsapp')");
   fs.writeFileSync(path.join(dataDir, "ocr-result-cache", "cache.json"), "cache descartavel");
+  fs.writeFileSync(path.join(dataDir, "ocr-cpu-0.lock"), "cpu lock descartavel");
 
   try {
     const key = crypto.randomBytes(32);
@@ -37,6 +38,7 @@ test("backup criptografado compacta os dados persistentes e exclui cache descart
     assert.match(archive, /auth\.sqlite/);
     assert.match(archive, /sessao whatsapp/);
     assert.doesNotMatch(archive, /cache descartavel/);
+    assert.doesNotMatch(archive, /cpu lock descartavel/);
 
     const corrupted = Buffer.from(encrypted);
     corrupted[corrupted.length - 1] ^= 0xff;

@@ -79,11 +79,11 @@ function getWorker() {
     env: { ...process.env, OCR_ISOLATED_PROCESS: "false", OCR_WORKER_PROCESS: "true" },
     stdio: ["ignore", "inherit", "inherit", "ipc"]
   });
-  // OCR consome CPU intensamente. Em contenÃ§Ã£o, mantenha o socket do bot
-  // O isolamento protege o socket; prioridade normal evita limitar o Tesseract.
+  // Background CPU work yields to the WhatsApp socket during contention.
   if (worker.pid) {
     try {
-      os.setPriority(worker.pid, 0);
+      // Use idle CPUs fully; give socket events priority during contention.
+      os.setPriority(worker.pid, os.constants.priority.PRIORITY_BELOW_NORMAL);
     } catch {
       // Alguns ambientes nÃ£o permitem alterar nice; o isolamento ainda vale.
     }

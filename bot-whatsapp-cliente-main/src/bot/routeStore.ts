@@ -17,6 +17,16 @@ export class RouteStore {
     return [...this.getRoutes()];
   }
 
+  setAnalysisPreview(analysisId: string, imagePreviewUrl: string) {
+    let changed = false;
+    this.routes = this.getRoutes().map(route => {
+      if (route.ocr?.analysisId !== analysisId || route.ocr.imagePreviewUrl === imagePreviewUrl) return route;
+      changed = true;
+      return { ...route, ocr: { ...route.ocr, imagePreviewUrl } };
+    });
+    if (changed) this.scheduleSave();
+  }
+
   clear() {
     this.routes = [];
     this.scheduleSave(0);

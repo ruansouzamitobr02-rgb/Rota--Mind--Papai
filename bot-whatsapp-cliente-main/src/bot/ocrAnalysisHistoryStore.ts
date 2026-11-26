@@ -17,6 +17,16 @@ export class OcrAnalysisHistoryStore {
     return this.items;
   }
 
+  setAnalysisPreview(analysisId: string, imagePreviewUrl: string) {
+    let changed = false;
+    this.items = this.items.map(item => {
+      if (item.analysisId !== analysisId || item.imagePreviewUrl === imagePreviewUrl) return item;
+      changed = true;
+      return { ...item, imagePreviewUrl };
+    });
+    if (changed) this.scheduleSave();
+  }
+
   upsert(selection: OcrRouteSelectionState) {
     if (["idle", "analyzing"].includes(selection.status)) return;
     const key = selection.analysisId || selection.processedAt;
