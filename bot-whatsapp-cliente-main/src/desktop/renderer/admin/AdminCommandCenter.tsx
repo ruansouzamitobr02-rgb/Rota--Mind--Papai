@@ -522,6 +522,9 @@ function RouteSidePanel({
               <dt>Preparação interna</dt><dd>{route.dispatchTimeline.internalWarmState === "ready" ? "Aquecida" : route.dispatchTimeline.internalWarmState || "Não registrada"}</dd>
               <dt>Dispositivos aquecidos</dt><dd>{route.dispatchTimeline.warmedDeviceCount ?? "Não registrado"}</dd>
               <dt>RTT do socket</dt><dd>{formatMs(route.dispatchTimeline.socketRttMs)}</dd>
+              <dt>Tempo desde o último tráfego</dt><dd>{formatMs(route.dispatchTimeline.socketIdleMs)}</dd>
+              <dt>Verificações sem resposta</dt><dd>{route.dispatchTimeline.socketProbeFailures ?? "Não registrado"}</dd>
+              <dt>Recuperações preventivas da conexão</dt><dd>{route.dispatchTimeline.socketRecoveryCount ?? "Não registrado"}</dd>
               <dt>Leitura de chaves</dt><dd>{formatMs(route.dispatchTimeline.signalKeyReadMs)} ({route.dispatchTimeline.signalKeyReadOps || 0} operação(ões))</dd>
               <dt>Gravação de chaves</dt><dd>{formatMs(route.dispatchTimeline.signalKeyWriteMs)} ({route.dispatchTimeline.signalKeyWriteOps || 0} operação(ões))</dd>
               <dt>Coordenação do primeiro envio</dt><dd>{formatMs(route.dispatchTimeline.coordinationWaitMs)}</dd>

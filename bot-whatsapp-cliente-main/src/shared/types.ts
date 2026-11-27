@@ -116,6 +116,9 @@ export type BotPerformanceMetrics = {
   lastSenderKeyWarmDurationMs?: number;
   authBackend?: "sqlite" | "multi-file";
   socketRttMs?: number;
+  socketIdleMs?: number;
+  socketProbeFailures?: number;
+  socketRecoveryCount?: number;
   workerProcessId?: number;
   workerRestartCount?: number;
   telemetryCount?: number;
@@ -173,6 +176,9 @@ export type RouteDispatchTimeline = {
   authBackend?: "sqlite" | "multi-file";
   warmedDeviceCount?: number;
   socketRttMs?: number;
+  socketIdleMs?: number;
+  socketProbeFailures?: number;
+  socketRecoveryCount?: number;
   signalKeyReadMs?: number;
   signalKeyWriteMs?: number;
   signalKeyReadOps?: number;

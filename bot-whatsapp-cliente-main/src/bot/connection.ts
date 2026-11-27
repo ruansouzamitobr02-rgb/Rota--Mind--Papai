@@ -309,8 +309,17 @@ export class BotService extends EventEmitter {
   private lastSenderKeyWarmDurationMs = 0;
   private lastSocketRttAt = 0;
   private lastSocketRttMs?: number;
+  private warmGeneration = 0;
+  private warmKeepAliveRun?: { socket: any; generation: number; group: string; promise: Promise<boolean> };
+  private readonly metadataRequests = new Map<string, { socket: any; generation: number; promise: Promise<any> }>();
+  private socketProbe?: { socket: any; promise: Promise<void> };
+  private lastSocketActivityAt = 0;
+  private socketProbeFailures = 0;
+  private lastSocketRecoveryAt = 0;
+  private socketRecoveryCount = 0;
+  private removeSocketActivityListener?: () => void;
   private activeSignalProfileTimeline?: RouteDispatchTimeline;
-  private groupCryptoWarmInFlight?: Promise<boolean>;
+  private groupCryptoWarmInFlight?: { socket: any; generation: number; signature: string; promise: Promise<boolean> };
   private preparedSenderKeys?: PreparedSenderKeys;
   private preparedSenderKeyClose?: Promise<void>;
   private warmedGroupDeviceJids: string[] = [];
@@ -394,6 +403,9 @@ export class BotService extends EventEmitter {
         lastSenderKeyWarmDurationMs: this.lastSenderKeyWarmDurationMs,
         authBackend: this.authBackend,
         socketRttMs: this.lastSocketRttMs,
+        socketIdleMs: this.lastSocketActivityAt ? Math.max(0, Date.now() - this.lastSocketActivityAt) : undefined,
+        socketProbeFailures: this.socketProbeFailures,
+        socketRecoveryCount: this.socketRecoveryCount,
         activeQueue: Math.max(this.performanceMetrics.activeQueue, this.dispatchQueueStore.pending().length),
         dispatchPriority: this.getDispatchPriorityProfile(),
         telemetryCount: telemetry.count,
@@ -608,6 +620,9 @@ export class BotService extends EventEmitter {
       senderKeyPreparedRecipients: this.preparedSenderKeys?.readyCount(this.preparedTargetJid) || 0,
       senderKeyCacheHits: 0,
       senderKeyCacheMisses: 0,
+      socketIdleMs: this.lastSocketActivityAt ? Math.max(0, sendStartedAt - this.lastSocketActivityAt) : undefined,
+      socketProbeFailures: this.socketProbeFailures,
+      socketRecoveryCount: this.socketRecoveryCount,
       events: [
         {
           id: `event-${eventDetectedAt}`,
@@ -1211,6 +1226,8 @@ export class BotService extends EventEmitter {
     this.monitoringEnabled = false;
     this.monitoringMode = "target";
     this.stopping = true;
+    this.removeSocketActivityListener?.();
+    this.removeSocketActivityListener = undefined;
     const preparedSenderKeyClose = this.closePreparedSenderKeys();
     this.sendCycleId += 1;
     this.activeTestRunId += 1;
@@ -1998,6 +2015,7 @@ export class BotService extends EventEmitter {
       cachedGroupMetadata: async (jid: string) => this.groupMetadataCache.get(jid)
     });
     this.installPreparedSenderKeys(this.sock);
+    this.trackSocketActivity(this.sock);
 
     this.sock.ev.on("creds.update", () => this.scheduleCredsSave());
     this.sock.ev.on("connection.update", (update: any) => {
@@ -2071,6 +2089,8 @@ export class BotService extends EventEmitter {
       this.unknownDisconnects = 0;
       this.reconnectAttempts = 0;
       this.consecutiveHealthCheckFailures = 0;
+      this.lastSocketActivityAt = Date.now();
+      this.socketProbeFailures = 0;
       this.clearQrCode(false);
       this.setStatus("connected");
       this.addStatusEvent("connected", "WhatsApp conectado.");
@@ -2101,6 +2121,8 @@ export class BotService extends EventEmitter {
 
     if (connection === "close") {
       const closedSocket = this.sock;
+      this.removeSocketActivityListener?.();
+      this.removeSocketActivityListener = undefined;
       const interruptedCycleId = this.activeSendCycleId;
       if (
         this.monitoringEnabled &&
@@ -2453,6 +2475,7 @@ export class BotService extends EventEmitter {
     if (connectionId !== this.activeConnectionId) return;
     const groupJid = String(update?.id || "");
     if (!groupJid || groupJid !== this.preparedTargetJid) return;
+    this.warmGeneration++;
     this.preparedSenderKeys?.invalidate(groupJid);
 
     this.groupMetadataCache.delete(groupJid);
@@ -4787,11 +4810,30 @@ export class BotService extends EventEmitter {
     this.closingWarmupTimer.unref?.();
   }
 
-  private async runWarmKeepAlive(
+  private runWarmKeepAlive(
     reason: "timer" | "armado" | "reconexão" | "fechamento" = "timer",
     config = this.configStore.load()
   ) {
-    if (this.status !== "connected" || !this.sock) return false;
+    const socket = this.sock, generation = this.warmGeneration, group = this.getActiveMonitoringGroup(config).jid;
+    const existing = this.warmKeepAliveRun;
+    if (existing && existing.socket === socket && existing.generation === generation && existing.group === group) return existing.promise;
+    const promise = this.runWarmKeepAliveNow(reason, config, socket, generation, group);
+    const run = { socket, generation, group, promise };
+    this.warmKeepAliveRun = run;
+    void promise.finally(() => { if (this.warmKeepAliveRun === run) this.warmKeepAliveRun = undefined; }).catch(() => undefined);
+    return promise;
+  }
+
+  private async runWarmKeepAliveNow(
+    reason: "timer" | "armado" | "reconexão" | "fechamento",
+    config: BotConfig,
+    socket: any,
+    generation: number,
+    group: string
+  ) {
+    const current = () => this.sock === socket && this.warmGeneration === generation && this.status === "connected" && !this.stopping
+      && this.getActiveMonitoringGroup().jid === group;
+    if (!socket || !current()) return false;
     if (this.criticalDispatchInProgress || this.activeSendCycle) return false;
     if (reason === "timer" && Date.now() - this.lastOpeningSignalAt < 3_000) return false;
     if (reason === "timer" && (this.processingImageIds.size > 0 || this.ocrRouteSelection.status === "analyzing")) {
@@ -4809,7 +4851,7 @@ export class BotService extends EventEmitter {
       } catch (error) {
         this.logger.warning(`[IA] Falha na checagem de abertura da rota pendente: ${this.getErrorMessage(error)}`);
       } finally { this.pendingOcrOpenCheckRunning = false; }
-      if (!this.monitoringEnabled || this.status !== "connected" || !this.sock || this.activeSendCycle) return false;
+      if (!current() || !this.monitoringEnabled || this.activeSendCycle) return false;
     }
     const nextInterval = this.getWarmKeepAliveIntervalMs(config);
     if (this.warmKeepAliveIntervalMs && nextInterval !== this.warmKeepAliveIntervalMs) {
@@ -4838,8 +4880,10 @@ export class BotService extends EventEmitter {
 
       if (shouldRefreshFullMetadata) {
         metadata = await this.refreshGroupMetadata(activeGroup.jid);
+        if (!current()) return false;
         this.lastFullMetadataWarmAt = Date.now();
       }
+      if (!current()) return false;
       if (this.criticalDispatchInProgress || this.activeSendCycle) {
         this.internalWarmState = "cold";
         this.emitSnapshot();
@@ -4870,10 +4914,13 @@ export class BotService extends EventEmitter {
         this.lastSenderKeyWarmAt > 0 &&
         Date.now() - this.lastSenderKeyWarmAt < SENDER_KEY_KEEP_ALIVE_INTERVAL_MS;
       const warmJobs: Promise<unknown>[] = [];
+      let activeChatWarm: Promise<void> | undefined;
       if (shouldWarmActiveChat) {
-        warmJobs.push(this.prewarmActiveChat(activeGroup.jid).then(() => {
-          this.lastActiveChatWarmAt = Date.now();
-        }));
+        // Presence is secondary. Its response can take 2.5 seconds and must
+        // never hold up local sender-key preparation for the first route.
+        activeChatWarm = this.prewarmActiveChat(activeGroup.jid).then(() => {
+          if (current()) this.lastActiveChatWarmAt = Date.now();
+        }).catch(() => undefined);
       }
       if (shouldWarmCrypto && cryptoSupported) {
         warmJobs.push(this.prewarmGroupCrypto(metadata, forceFullWarm).then((ready) => {
@@ -4886,15 +4933,18 @@ export class BotService extends EventEmitter {
         }));
       }
       if (shouldMeasureSocketRtt) void this.measureSocketRtt();
-      if (!warmJobs.length) {
+      if (!warmJobs.length && !activeChatWarm) {
         await this.prepareSenderKeyFanout(activeGroup.jid, metadata);
-        return this.getCurrentInternalWarmState() === "ready";
+        return current() && this.getCurrentInternalWarmState() === "ready";
       }
       await Promise.all(warmJobs);
+      if (!current()) return false;
 
       if (cryptoReady && senderKeyReady && !this.criticalDispatchInProgress && !this.activeSendCycle) {
         await this.prepareSenderKeyFanout(activeGroup.jid, metadata);
       }
+      if (activeChatWarm) await activeChatWarm;
+      if (!current()) return false;
 
       if (this.criticalDispatchInProgress || this.activeSendCycle || !cryptoReady || !senderKeyReady) {
         this.internalWarmState = "cold";
@@ -4918,6 +4968,7 @@ export class BotService extends EventEmitter {
       if (forceFullWarm) this.emitSnapshot();
       return true;
     } catch (error) {
+      if (!current()) return false;
       this.lastKeepAliveDurationMs = Date.now() - startedAt;
       this.lastInternalWarmDurationMs = this.lastKeepAliveDurationMs;
       this.internalWarmState = "cold";
@@ -4954,6 +5005,7 @@ export class BotService extends EventEmitter {
   private invalidateInternalWarmState(clearCaches = false) {
     this.internalWarmState = "cold";
     if (!clearCaches) return;
+    this.warmGeneration++;
     this.preparedSenderKeys?.invalidate();
     this.warmedGroupDeviceJids = [];
     this.lastInternalWarmAt = undefined;
@@ -5144,8 +5196,11 @@ export class BotService extends EventEmitter {
     const isFresh = signature === this.warmedGroupParticipantSignature &&
       Date.now() - this.lastGroupCryptoWarmAt < CRYPTO_SESSION_KEEP_ALIVE_INTERVAL_MS;
     if (!force && isFresh) return true;
-    if (this.groupCryptoWarmInFlight) return this.groupCryptoWarmInFlight;
     const socket = this.sock;
+    const generation = this.warmGeneration;
+    const existing = this.groupCryptoWarmInFlight;
+    if (existing && existing.socket === socket && existing.generation === generation && existing.signature === signature) return existing.promise;
+    const current = () => socket === this.sock && generation === this.warmGeneration && !this.stopping;
 
     const startedAt = Date.now();
     const warmPromise = (async () => {
@@ -5153,12 +5208,15 @@ export class BotService extends EventEmitter {
         // Ao armar/reconectar, consulte uma lista realmente fresca. Nos ciclos
         // periódicos, use o cache do Baileys para não criar tráfego desnecessário.
         const devices = await socket.getUSyncDevices(participantJids, !force, false);
-        if (socket !== this.sock || this.stopping) return false;
+        if (!current()) return false;
+        // Opening may arrive while device discovery awaits the network. Let
+        // the real relay own session preparation instead of starting a rival.
+        if (this.criticalDispatchInProgress || this.activeSendCycle) return false;
         const deviceJids = (devices || [])
           .map((device: any) => String(device?.jid || ""))
           .filter(Boolean);
         if (deviceJids.length) await socket.assertSessions(deviceJids, false);
-        if (socket !== this.sock || this.stopping) return false;
+        if (!current()) return false;
         this.warmedGroupDeviceJids = deviceJids;
         this.warmedGroupParticipantSignature = signature;
         this.lastGroupCryptoWarmAt = Date.now();
@@ -5169,22 +5227,25 @@ export class BotService extends EventEmitter {
         }
         return true;
       } catch (error) {
+        if (!current()) return false;
         this.lastGroupCryptoWarmDurationMs = Date.now() - startedAt;
         this.logger.warning(`Pré-aquecimento criptográfico não concluído: ${this.getErrorMessage(error)}.`);
         return false;
       }
     })();
 
-    this.groupCryptoWarmInFlight = warmPromise;
+    const running = { socket, generation, signature, promise: warmPromise };
+    this.groupCryptoWarmInFlight = running;
     try {
       return await warmPromise;
     } finally {
-      if (this.groupCryptoWarmInFlight === warmPromise) this.groupCryptoWarmInFlight = undefined;
+      if (this.groupCryptoWarmInFlight === running) this.groupCryptoWarmInFlight = undefined;
     }
   }
 
   private async prewarmGroupSenderKeyMemory(jid: string) {
-    const keys = this.sock?.authState?.keys;
+    const socket = this.sock, generation = this.warmGeneration;
+    const keys = socket?.authState?.keys;
     if (!jid || typeof keys?.get !== "function") {
       this.lastSenderKeyWarmAt = Date.now();
       this.lastSenderKeyWarmDurationMs = 0;
@@ -5194,10 +5255,12 @@ export class BotService extends EventEmitter {
     const startedAt = Date.now();
     try {
       await keys.get("sender-key-memory", [jid]);
+      if (socket !== this.sock || generation !== this.warmGeneration || this.stopping) return false;
       this.lastSenderKeyWarmAt = Date.now();
       this.lastSenderKeyWarmDurationMs = this.lastSenderKeyWarmAt - startedAt;
       return true;
     } catch (error) {
+      if (socket !== this.sock || generation !== this.warmGeneration || this.stopping) return false;
       this.lastSenderKeyWarmDurationMs = Date.now() - startedAt;
       this.logger.warning(`Memória criptográfica do grupo não foi aquecida: ${this.getErrorMessage(error)}.`);
       return false;
@@ -5255,29 +5318,76 @@ export class BotService extends EventEmitter {
     }
   }
 
-  private async measureSocketRtt() {
-    this.lastSocketRttAt = Date.now();
-    if (!this.sock || typeof this.sock.query !== "function" || typeof this.sock.generateMessageTag !== "function") {
-      return;
-    }
+  private trackSocketActivity(socket: any) {
+    this.removeSocketActivityListener?.();
+    const activity = () => {
+      if (this.sock !== socket || this.stopping) return;
+      this.lastSocketActivityAt = Date.now();
+      this.socketProbeFailures = 0;
+    };
+    socket.ws?.on?.("message", activity);
+    this.removeSocketActivityListener = () => socket.ws?.off?.("message", activity);
+  }
 
+  private measureSocketRtt(): Promise<void> {
+    const socket = this.sock;
+    if (this.socketProbe && this.socketProbe.socket === socket) return this.socketProbe.promise;
+    this.lastSocketRttAt = Date.now();
+    if (!socket || typeof socket.query !== "function" || typeof socket.generateMessageTag !== "function") {
+      return Promise.resolve();
+    }
+    const promise = this.probeSocket(socket);
+    const probe = { socket, promise };
+    this.socketProbe = probe;
+    void promise.finally(() => { if (this.socketProbe === probe) this.socketProbe = undefined; }).catch(() => undefined);
+    return promise;
+  }
+
+  private async probeSocket(socket: any) {
     const startedAt = process.hrtime.bigint();
     try {
-      const query = this.sock.query({
+      const query = socket.query({
         tag: "iq",
         attrs: {
-          id: this.sock.generateMessageTag(),
+          id: socket.generateMessageTag(),
           to: "s.whatsapp.net",
           type: "get",
           xmlns: "w:p"
         },
         content: [{ tag: "ping", attrs: {} }]
-      });
+      }, 1_500);
       await this.withTimeout(query, 1_500);
+      if (this.sock !== socket || this.stopping) return;
       this.lastSocketRttMs = roundMetric(Number(process.hrtime.bigint() - startedAt) / 1_000_000);
+      this.lastSocketActivityAt = Date.now();
+      this.socketProbeFailures = 0;
     } catch {
+      if (this.sock !== socket || this.stopping) return;
       this.lastSocketRttMs = undefined;
+      this.socketProbeFailures++;
+      this.recoverUnresponsiveSocket(socket);
     }
+  }
+
+  private recoverUnresponsiveSocket(socket: any) {
+    const now = Date.now();
+    // A slow response alone is not a dead connection. Require repeated probe
+    // failures AND no incoming traffic, and never reconnect during a race/OCR.
+    if (process.env.BOT_SOCKET_WATCHDOG === "false" || this.sock !== socket || this.stopping || this.status !== "connected"
+      || this.socketProbeFailures < 3 || !this.lastSocketActivityAt || now - this.lastSocketActivityAt < 45_000
+      || this.groupState !== "closed" || this.criticalDispatchInProgress || this.activeSendCycle
+      || this.processingImageIds.size || this.ocrRouteSelection.status === "analyzing"
+      || now - this.lastOpeningSignalAt < 15_000
+      || (this.lastSocketRecoveryAt && now - this.lastSocketRecoveryAt < 300_000)
+      || typeof socket.end !== "function") return;
+    this.lastSocketRecoveryAt = now;
+    this.socketRecoveryCount++;
+    this.logger.warning("Conexão sem tráfego e com três verificações sem resposta. Recuperando o socket e preservando as rotas preparadas.");
+    try {
+      void Promise.resolve(socket.end(new Boom("Conexão sem resposta nas verificações preventivas.", { statusCode: 408 })))
+        .catch(error => this.logger.warning(`Não consegui recuperar o socket sem resposta: ${this.getErrorMessage(error)}.`));
+    }
+    catch (error) { this.logger.warning(`Não consegui recuperar o socket sem resposta: ${this.getErrorMessage(error)}.`); }
   }
 
   private getReadinessChecks(): BotReadinessCheck[] {
@@ -5541,12 +5651,22 @@ export class BotService extends EventEmitter {
       .filter(Boolean);
   }
 
-  private async refreshGroupMetadata(jid: string) {
+  private refreshGroupMetadata(jid: string): Promise<any> {
+    const socket = this.sock, generation = this.warmGeneration;
+    const existing = this.metadataRequests.get(jid);
+    if (existing && existing.socket === socket && existing.generation === generation) return existing.promise;
+    const promise = this.fetchGroupMetadata(jid, socket, generation);
+    const request = { socket, generation, promise };
+    this.metadataRequests.set(jid, request);
+    void promise.finally(() => { if (this.metadataRequests.get(jid) === request) this.metadataRequests.delete(jid); }).catch(() => undefined);
+    return promise;
+  }
+
+  private async fetchGroupMetadata(jid: string, socket: any, generation: number) {
     try {
-      const socket = this.sock;
       const revision = this.groupStateRevision;
       let metadata = await socket.groupMetadata(jid);
-      if (socket !== this.sock) return undefined;
+      if (socket !== this.sock || generation !== this.warmGeneration || this.stopping) return undefined;
       if (metadata && jid === this.preparedTargetJid && revision !== this.groupStateRevision && this.groupState !== "unknown") {
         metadata = { ...metadata, announce: this.groupState === "closed" };
       }

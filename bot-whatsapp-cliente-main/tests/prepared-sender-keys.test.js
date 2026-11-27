@@ -10,11 +10,13 @@ const canonical = message => Buffer.from(JSON.stringify(message));
 test("diagnóstico de primeira mensagem e prioridade permanece após reiniciar o histórico", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "first-relay-history-")), file = path.join(dir, "routes.json");
   const timeline = { eventDetectedAt: new Date().toISOString(), sendStartedAt: new Date().toISOString(), detectionDelayMs: 2, mode: "race", openingSignal: "metadata_check", timeoutUsed: false, retryUsed: false, notAcceptableCount: 0, events: [], coordinationWaitMs: 7, priorityDelayMs: 400, dispatchPriority: { level: 1, delayMs: 400 }, senderKeyPreparedRecipients: 1059, senderKeyCacheHits: 1059, senderKeyCacheMisses: 0, groupEncryptionMs: 2, participantEncryptionMs: 9 };
+  Object.assign(timeline, { socketIdleMs: 20, socketProbeFailures: 0, socketRecoveryCount: 1 });
   try {
     const store = new RouteStore(file); store.create({ id: "route", clientEmail: "fixture@test.com", groupJid: group, groupName: "Fixture", mode: "target", messages: ["D-16"], sentMessageIds: ["id"], confirmedCount: 1, totalCount: 1, status: "sent", dispatchTimeline: timeline }); store.flush();
     const restored = new RouteStore(file).all()[0].dispatchTimeline;
     for (const key of ["openingSignal", "coordinationWaitMs", "priorityDelayMs", "senderKeyPreparedRecipients", "senderKeyCacheHits", "senderKeyCacheMisses", "groupEncryptionMs", "participantEncryptionMs"]) assert.equal(restored[key], timeline[key]);
     assert.deepEqual(restored.dispatchPriority, timeline.dispatchPriority);
+    for (const key of ["socketIdleMs", "socketProbeFailures", "socketRecoveryCount"]) assert.equal(restored[key], timeline[key]);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 

@@ -35,3 +35,13 @@ Uma preparação aproveitada apresenta **Chaves antecipadas utilizadas** maior q
 `npm run bench:first-relay` compara criptografia Signal real com sessões sintéticas, sem conectar ao WhatsApp nem enviar mensagens. Para 1.059 destinatários e três amostras, a mediana local do trecho crítico passou de 79,3 ms para 10,0 ms; a preparação anterior à abertura levou 94,3 ms. Essa redução de 87,4% se refere somente ao trabalho local medido, não ao tempo total até a entrega em produção.
 
 Os testes incluem descriptografia real da primeira rota, descarte do cache durante um reinício, sessão alterada por outra mensagem, uso único, cancelamento entre lotes, retomada normal, preparação sem marcação de entrega e persistência do diagnóstico. Não há garantia de vencer outros participantes: ordem de chegada do evento, rede e processamento do WhatsApp também influenciam.
+
+## Preparação concorrente e conexão sem resposta
+
+Armar, receber um fechamento e executar o timer compartilham a preparação em andamento para o mesmo grupo e socket. Consultas simultâneas de metadados também compartilham uma requisição. Respostas de outro socket, grupo ou geração de preparação não podem repor caches invalidados.
+
+A presença é secundária: uma resposta lenta, cujo limite já era de 2,5 segundos, não segura a criptografia antecipada. Se a descoberta de dispositivos terminar depois da abertura, o aquecimento cede a preparação das sessões ao relay real. O caminho do primeiro envio não espera a conclusão do aquecimento.
+
+O watchdog reutiliza os pings de diagnóstico existentes, sem aumentar a frequência nem enviar mensagens de teste. Só solicita recuperação quando há pelo menos três falhas e 45 segundos sem tráfego recebido. Não reconecta por RTT alto isolado. A recuperação é impedida durante disparo, leitura de imagem, grupo aberto e nos 15 segundos após uma abertura. Há intervalo mínimo de cinco minutos entre recuperações preventivas. O fechamento normal do SDK reconecta e mantém a recuperação de rotas já existente, sem apagar sessões ou chamar `stop()`/`restart()` do bot.
+
+`BOT_SOCKET_WATCHDOG=false` desativa somente a recuperação preventiva. O painel registra tempo desde o último tráfego, falhas de verificação e recuperações da conexão no diagnóstico de cada disparo; esses campos permanecem após reiniciar.
