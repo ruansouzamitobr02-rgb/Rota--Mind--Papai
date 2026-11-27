@@ -18,6 +18,7 @@ import { OcrAnalysisHistoryStore } from "./ocrAnalysisHistoryStore";
 import { RouteStore } from "./routeStore";
 import { TelemetryStore } from "./telemetryStore";
 import { useSqliteAuthState } from "./sqliteAuthState";
+import { PreparedSenderKeys } from "./preparedSenderKeys";
 import { DEFAULT_LEADER_CONTACTS } from "./leaderDefaults";
 import { RomaneioStore } from "../services/romaneio/romaneioStore";
 import { isPreferredImageCity, PREFERRED_IMAGE_CITY, rankImageRouteOptions } from "../services/romaneio/rankImageRoutes";
@@ -310,6 +311,10 @@ export class BotService extends EventEmitter {
   private lastSocketRttMs?: number;
   private activeSignalProfileTimeline?: RouteDispatchTimeline;
   private groupCryptoWarmInFlight?: Promise<boolean>;
+  private preparedSenderKeys?: PreparedSenderKeys;
+  private preparedSenderKeyClose?: Promise<void>;
+  private warmedGroupDeviceJids: string[] = [];
+  private readonly participantEncryptionWindows = new WeakMap<RouteDispatchTimeline, { first: number; last: number }>();
   private adaptiveOpeningSettleMs = 0;
   private lastNotAcceptableAlertAt = 0;
   private romaneioDocumentCandidates = new Map<string, { candidate: RomaneioCandidate; message: any }>();
@@ -550,7 +555,11 @@ export class BotService extends EventEmitter {
       set: async (data: Record<string, Record<string, unknown>>) => {
         const startedAt = process.hrtime.bigint();
         try {
-          return await keys.set(data);
+          // The SDK cache may change before persistence completes. Invalidate
+          // old prepared frames even if the underlying write later fails.
+          this.preparedSenderKeys?.observeKeyMutation(data);
+          const result = await keys.set(data);
+          return result;
         } finally {
           this.recordSignalKeyTiming("write", startedAt);
         }
@@ -596,6 +605,9 @@ export class BotService extends EventEmitter {
       signalKeyWriteOps: 0,
       dispatchPriority: this.getDispatchPriorityProfile(),
       priorityDelayMs: 0,
+      senderKeyPreparedRecipients: this.preparedSenderKeys?.readyCount(this.preparedTargetJid) || 0,
+      senderKeyCacheHits: 0,
+      senderKeyCacheMisses: 0,
       events: [
         {
           id: `event-${eventDetectedAt}`,
@@ -963,6 +975,7 @@ export class BotService extends EventEmitter {
     this.clearWarmKeepAliveTimer();
     this.logger.info("⏹️ Monitoramento desativado (Parou de escutar aberturas).");
     this.addStatusEvent("disarmed", "Monitoramento desativado pelo painel.");
+    this.keepIdlePreparationAlive();
     this.emitSnapshot();
   }
 
@@ -1198,6 +1211,7 @@ export class BotService extends EventEmitter {
     this.monitoringEnabled = false;
     this.monitoringMode = "target";
     this.stopping = true;
+    const preparedSenderKeyClose = this.closePreparedSenderKeys();
     this.sendCycleId += 1;
     this.activeTestRunId += 1;
     this.activeConnectionId += 1;
@@ -1207,6 +1221,7 @@ export class BotService extends EventEmitter {
     this.reconnectAttempts = 0;
     this.clearQrCode();
 
+    await preparedSenderKeyClose;
     await this.flushCreds().catch((error) => {
       this.logger.warning(`Não consegui salvar credenciais antes de parar: ${this.getErrorMessage(error)}`);
     });
@@ -1919,6 +1934,8 @@ export class BotService extends EventEmitter {
 
     await loadBaileys();
     if (this.stopping || connectionId !== this.activeConnectionId) return;
+    await this.closePreparedSenderKeys();
+    if (this.stopping || connectionId !== this.activeConnectionId) return;
     await this.closeAuthState?.().catch(() => undefined);
     if (this.stopping || connectionId !== this.activeConnectionId) return;
     this.closeAuthState = undefined;
@@ -1980,6 +1997,7 @@ export class BotService extends EventEmitter {
       shouldIgnoreJid: (jid: string) => this.shouldIgnoreSocketJid(jid),
       cachedGroupMetadata: async (jid: string) => this.groupMetadataCache.get(jid)
     });
+    this.installPreparedSenderKeys(this.sock);
 
     this.sock.ev.on("creds.update", () => this.scheduleCredsSave());
     this.sock.ev.on("connection.update", (update: any) => {
@@ -2103,6 +2121,7 @@ export class BotService extends EventEmitter {
       this.clearHealthCheckTimer();
       this.clearWarmKeepAliveTimer();
       this.disposeSocket(closedSocket);
+      await this.closePreparedSenderKeys();
       await this.flushCreds().catch((error) => {
         this.logger.warning(`Falha ao persistir sessão ao fechar o socket: ${this.getErrorMessage(error)}`);
       });
@@ -2434,11 +2453,13 @@ export class BotService extends EventEmitter {
     if (connectionId !== this.activeConnectionId) return;
     const groupJid = String(update?.id || "");
     if (!groupJid || groupJid !== this.preparedTargetJid) return;
+    this.preparedSenderKeys?.invalidate(groupJid);
 
     this.groupMetadataCache.delete(groupJid);
     this.warmedGroupParticipantSignature = "";
     this.lastGroupCryptoWarmAt = 0;
     this.warmedGroupDeviceCount = 0;
+    this.warmedGroupDeviceJids = [];
     this.lastSenderKeyWarmAt = 0;
     this.invalidateInternalWarmState();
 
@@ -4112,6 +4133,7 @@ export class BotService extends EventEmitter {
       timeline.dispatchPriority = priority;
       const coordinatedByServer = this.shouldApplyDispatchPriorityDelay(trigger) && Boolean(this.dispatchGateRequester);
       if (coordinatedByServer) {
+        const coordinationStartedAt = Date.now();
         const grant = await this.dispatchGateRequester!({
           clientEmail: this.clientEmail,
           groupKey: jid,
@@ -4119,6 +4141,9 @@ export class BotService extends EventEmitter {
           eventKey: this.getDispatchRaceEventKey(),
           targetDispatchMode: this.preparedTargetDispatchMode
         });
+        timeline.coordinationWaitMs = Math.max(0, Date.now() - coordinationStartedAt);
+        timeline.priorityDelayMs = Math.max(0, grant.waitedMs || 0);
+        this.addTimelineEvent(timeline, "Coordenação de envio concluída", Date.now(), "info", `${timeline.coordinationWaitMs}ms no total; ${timeline.priorityDelayMs}ms aguardando prioridade.`);
         dispatchGateToken = grant.token;
         if (cycleId !== this.sendCycleId || (trigger === "automatic" && !this.monitoringEnabled)) {
           throw new Error("O ciclo do grupo foi encerrado antes do envio.");
@@ -4422,6 +4447,7 @@ export class BotService extends EventEmitter {
     this.clearHealthCheckTimer();
     this.clearWarmKeepAliveTimer();
     this.logger.warning("Disparo no grupo alvo finalizado. Bot parado automaticamente para evitar mensagens duplicadas.");
+    this.keepIdlePreparationAlive();
     this.emitSnapshot();
   }
 
@@ -4728,15 +4754,16 @@ export class BotService extends EventEmitter {
     }, HEALTH_CHECK_INTERVAL_MS);
   }
 
-  private startWarmKeepAlive(reason: "armado" | "reconexão" = "armado") {
+  private startWarmKeepAlive(reason: "armado" | "reconexão" | "timer" = "armado") {
     this.clearWarmKeepAliveTimer();
     const config = this.configStore.load();
 
     const intervalMs = this.getWarmKeepAliveIntervalMs(config);
     this.warmKeepAliveIntervalMs = intervalMs;
     this.warmKeepAliveTimer = setInterval(() => {
-      void this.runWarmKeepAlive("timer", config);
+      void this.runWarmKeepAlive("timer");
     }, intervalMs);
+    this.warmKeepAliveTimer.unref?.();
 
     const initialWarmup = this.runWarmKeepAlive(reason, config);
     void initialWarmup.catch(() => undefined);
@@ -4786,7 +4813,7 @@ export class BotService extends EventEmitter {
     }
     const nextInterval = this.getWarmKeepAliveIntervalMs(config);
     if (this.warmKeepAliveIntervalMs && nextInterval !== this.warmKeepAliveIntervalMs) {
-      void this.startWarmKeepAlive(reason === "reconexão" ? "reconexão" : "armado");
+      void this.startWarmKeepAlive(reason === "reconexão" ? "reconexão" : reason === "timer" ? "timer" : "armado");
       return true;
     }
 
@@ -4859,8 +4886,15 @@ export class BotService extends EventEmitter {
         }));
       }
       if (shouldMeasureSocketRtt) void this.measureSocketRtt();
-      if (!warmJobs.length) return this.getCurrentInternalWarmState() === "ready";
+      if (!warmJobs.length) {
+        await this.prepareSenderKeyFanout(activeGroup.jid, metadata);
+        return this.getCurrentInternalWarmState() === "ready";
+      }
       await Promise.all(warmJobs);
+
+      if (cryptoReady && senderKeyReady && !this.criticalDispatchInProgress && !this.activeSendCycle) {
+        await this.prepareSenderKeyFanout(activeGroup.jid, metadata);
+      }
 
       if (this.criticalDispatchInProgress || this.activeSendCycle || !cryptoReady || !senderKeyReady) {
         this.internalWarmState = "cold";
@@ -4905,12 +4939,23 @@ export class BotService extends EventEmitter {
   private getWarmKeepAliveIntervalMs(config = this.configStore.load()) {
     const configuredInterval = Math.max(15000, config.keepAliveIntervalMs || DEFAULT_KEEP_ALIVE_INTERVAL_MS);
     if (this.monitoringMode !== "target") return Math.max(60000, configuredInterval);
+    if (!this.monitoringEnabled) return Math.min(configuredInterval, 30_000);
     return Math.min(configuredInterval, this.isCriticalWarmWindow() ? CRITICAL_KEEP_ALIVE_INTERVAL_MS : RACE_KEEP_ALIVE_INTERVAL_MS);
+  }
+
+  private keepIdlePreparationAlive() {
+    if (this.status !== "connected" || !this.sock || this.stopping) return;
+    // Keep sessions fresh after a pause/finished route without arming the bot
+    // again or publishing a chat message. Disconnect/financial block still
+    // closes the socket and clears this timer through stop().
+    void this.startWarmKeepAlive("timer").catch(error => this.logger.warning(`Preparação interna pausada: ${this.getErrorMessage(error)}.`));
   }
 
   private invalidateInternalWarmState(clearCaches = false) {
     this.internalWarmState = "cold";
     if (!clearCaches) return;
+    this.preparedSenderKeys?.invalidate();
+    this.warmedGroupDeviceJids = [];
     this.lastInternalWarmAt = undefined;
     this.lastInternalWarmDurationMs = 0;
     this.lastActiveChatWarmAt = 0;
@@ -5100,17 +5145,21 @@ export class BotService extends EventEmitter {
       Date.now() - this.lastGroupCryptoWarmAt < CRYPTO_SESSION_KEEP_ALIVE_INTERVAL_MS;
     if (!force && isFresh) return true;
     if (this.groupCryptoWarmInFlight) return this.groupCryptoWarmInFlight;
+    const socket = this.sock;
 
     const startedAt = Date.now();
     const warmPromise = (async () => {
       try {
         // Ao armar/reconectar, consulte uma lista realmente fresca. Nos ciclos
         // periódicos, use o cache do Baileys para não criar tráfego desnecessário.
-        const devices = await this.sock.getUSyncDevices(participantJids, !force, false);
+        const devices = await socket.getUSyncDevices(participantJids, !force, false);
+        if (socket !== this.sock || this.stopping) return false;
         const deviceJids = (devices || [])
           .map((device: any) => String(device?.jid || ""))
           .filter(Boolean);
-        if (deviceJids.length) await this.sock.assertSessions(deviceJids, false);
+        if (deviceJids.length) await socket.assertSessions(deviceJids, false);
+        if (socket !== this.sock || this.stopping) return false;
+        this.warmedGroupDeviceJids = deviceJids;
         this.warmedGroupParticipantSignature = signature;
         this.lastGroupCryptoWarmAt = Date.now();
         this.lastGroupCryptoWarmDurationMs = this.lastGroupCryptoWarmAt - startedAt;
@@ -5152,6 +5201,57 @@ export class BotService extends EventEmitter {
       this.lastSenderKeyWarmDurationMs = Date.now() - startedAt;
       this.logger.warning(`Memória criptográfica do grupo não foi aquecida: ${this.getErrorMessage(error)}.`);
       return false;
+    }
+  }
+
+  private closePreparedSenderKeys() {
+    const prepared = this.preparedSenderKeys;
+    this.preparedSenderKeys = undefined;
+    const closing = Promise.all([this.preparedSenderKeyClose, prepared?.close()]).then(() => undefined);
+    this.preparedSenderKeyClose = closing;
+    return closing;
+  }
+
+  private installPreparedSenderKeys(socket: any) {
+    this.preparedSenderKeys?.dispose();
+    this.preparedSenderKeys = undefined;
+    const repository = socket.signalRepository;
+    if (typeof repository?.encryptGroupMessage === "function") {
+      const encrypt = repository.encryptGroupMessage;
+      repository.encryptGroupMessage = async (input: unknown) => {
+        const timeline = this.activeSignalProfileTimeline, started = process.hrtime.bigint();
+        try { return await encrypt.call(repository, input); }
+        finally { if (timeline) timeline.groupEncryptionMs = roundMetric((timeline.groupEncryptionMs || 0) + Number(process.hrtime.bigint() - started) / 1_000_000); }
+      };
+    }
+    if (process.env.BOT_PREPARE_FIRST_RELAY === "false" || !PreparedSenderKeys.supported(socket)) return;
+    this.preparedSenderKeys = new PreparedSenderKeys(socket, {
+      canonical: message => proto.Message.encode(message).finish()
+    }, (hit, first, last) => {
+      const timeline = this.activeSignalProfileTimeline;
+      if (!timeline) return;
+      if (hit) timeline.senderKeyCacheHits = (timeline.senderKeyCacheHits || 0) + 1;
+      else timeline.senderKeyCacheMisses = (timeline.senderKeyCacheMisses || 0) + 1;
+      const window = this.participantEncryptionWindows.get(timeline) || { first, last };
+      window.first = Math.min(window.first, first); window.last = Math.max(window.last, last);
+      this.participantEncryptionWindows.set(timeline, window);
+      timeline.participantEncryptionMs = Math.max(0, window.last - window.first);
+    });
+  }
+
+  private async prepareSenderKeyFanout(group: string, metadata: any) {
+    const socket = this.sock, prepared = this.preparedSenderKeys;
+    if (!prepared || !this.warmedGroupDeviceJids.length || !this.warmedGroupParticipantSignature.startsWith(`${group}::`)
+      || this.groupState === "open" || metadata?.announce === false) return 0;
+    const valid = () => this.sock === socket && this.status === "connected" && !this.stopping
+      && !this.criticalDispatchInProgress && !this.activeSendCycle && this.groupState !== "open"
+      && this.getActiveMonitoringGroup().jid === group;
+    if (!valid()) return 0;
+    try { return await prepared.prepare(group, metadata, this.warmedGroupDeviceJids, valid); }
+    catch (error) {
+      if (!valid()) return 0;
+      this.logger.warning(`Preparação local do primeiro envio incompleta; o envio normal continua disponível: ${this.getErrorMessage(error)}.`);
+      return 0;
     }
   }
 

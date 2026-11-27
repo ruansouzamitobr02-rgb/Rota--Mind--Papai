@@ -524,6 +524,14 @@ function RouteSidePanel({
               <dt>RTT do socket</dt><dd>{formatMs(route.dispatchTimeline.socketRttMs)}</dd>
               <dt>Leitura de chaves</dt><dd>{formatMs(route.dispatchTimeline.signalKeyReadMs)} ({route.dispatchTimeline.signalKeyReadOps || 0} operação(ões))</dd>
               <dt>Gravação de chaves</dt><dd>{formatMs(route.dispatchTimeline.signalKeyWriteMs)} ({route.dispatchTimeline.signalKeyWriteOps || 0} operação(ões))</dd>
+              <dt>Coordenação do primeiro envio</dt><dd>{formatMs(route.dispatchTimeline.coordinationWaitMs)}</dd>
+              <dt>Espera por prioridade</dt><dd>{formatMs(route.dispatchTimeline.priorityDelayMs)}</dd>
+              <dt>Criptografia do grupo</dt><dd>{formatMs(route.dispatchTimeline.groupEncryptionMs)}</dd>
+              <dt>Retorno da mensagem no grupo</dt><dd>{formatMs(route.dispatchTimeline.firstGroupEchoMs)}</dd>
+              <dt>Preparação dos destinatários</dt><dd>{formatMs(route.dispatchTimeline.participantEncryptionMs)}</dd>
+              <dt>Dispositivos preparados antes da abertura</dt><dd>{route.dispatchTimeline.senderKeyPreparedRecipients ?? "Não registrado"}</dd>
+              <dt>Chaves antecipadas utilizadas</dt><dd>{route.dispatchTimeline.senderKeyCacheHits ?? "Não registrado"}</dd>
+              <dt>Destinatários preparados durante o envio</dt><dd>{route.dispatchTimeline.senderKeyCacheMisses ?? "Não registrado"}</dd>
               <dt>Segunda mensagem</dt><dd>{route.dispatchTimeline.secondLaneMode === "speculative" ? "Faixa rápida adaptativa" : "Protegida pelo ACK"}</dd>
               <dt>Timeout usado</dt><dd>{route.dispatchTimeline.timeoutUsed ? "sim" : "não"}</dd>
               <dt>Retry usado</dt><dd>{route.dispatchTimeline.retryUsed ? "sim" : "não"}</dd>

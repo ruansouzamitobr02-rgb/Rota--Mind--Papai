@@ -1,0 +1,37 @@
+# Primeiro envio em grupos grandes
+
+## Caso observado
+
+O diagnóstico fornecido para um grupo com 1.059 dispositivos mostrou detecção em 2 ms, primeira chamada de relay em 10 ms após iniciar o disparo e retorno do relay em 532 ms. A imagem estava pronta cerca de 9 segundos antes da abertura. Foram registradas 1.052 leituras de chaves.
+
+Esses tempos afastam o OCR como causa desse caso. O intervalo restante inclui trabalho interno do SDK, criptografia para destinatários, gravação de sessões e comunicação com o WhatsApp. Ele não mede somente rede nem comprova que todo esse tempo possa ser eliminado.
+
+## Preparação local
+
+`src/bot/preparedSenderKeys.ts` utiliza as funções do SDK para antecipar a criptografia da distribuição da chave do grupo. A preparação acontece enquanto o grupo está fechado, depois da preparação normal das sessões dos dispositivos.
+
+- Não chama `relayMessage`, `sendMessage` ou `sendNode` e não marca os destinatários como se já tivessem recebido a chave.
+- Prepara somente mensagens de distribuição de chave. O texto da rota, seu identificador e o envio real continuam sendo montados pelo caminho normal do SDK.
+- Usa o mutex por destinatário e as transações normais do repositório Signal, sem segurar uma transação global entre lotes.
+- Trabalha em lotes de 16, cedendo ao processamento de eventos entre eles. A abertura, a desconexão e o cancelamento interrompem os próximos lotes.
+- Guarda somente cifras já criptografadas em memória, com limite de 4.096 destinatários. Nenhuma cifra antecipada é gravada em backup ou enviada ao painel.
+- Cada cifra é consumida uma única vez e somente para o destinatário e a distribuição de chave exatos, ignorando apenas o padding aleatório do protobuf.
+- Captura as versões das sessões efetivamente alteradas durante a operação de criptografia. Mudanças de sessão, identidade, mapeamento de endereços ou membros invalidam a preparação correspondente.
+- Cifra ausente, obsoleta ou já consumida segue o caminho normal de criptografia do SDK.
+- Parada e reconexão aguardam o lote em andamento antes de fechar o armazenamento da sessão; os próximos lotes são cancelados.
+
+Pausar o monitoramento ou concluir uma rota mantém uma preparação silenciosa a cada 30 segundos enquanto a conexão estiver ativa. Isso não rearma o bot, não publica uma mensagem e não autoriza nenhum disparo. Desconectar ou bloquear financeiramente continua encerrando a conexão e o timer.
+
+`BOT_PREPARE_FIRST_RELAY=false` desativa a antecipação e mantém o caminho normal. O padrão é ativado, sem necessidade de novas variáveis no Render.
+
+## Como conferir
+
+Abra a rota em **Histórico → Diagnóstico do disparo**. Os novos campos separam coordenação, espera por prioridade, criptografia do grupo, preparação de destinatários, quantidade antecipada e acertos/fallbacks da preparação. O retorno da mensagem no grupo continua sendo uma medida separada do término do relay.
+
+Uma preparação aproveitada apresenta **Chaves antecipadas utilizadas** maior que zero. Zero também é normal quando os destinatários já receberam a chave e não precisam de nova distribuição. Pode ocorrer ainda por sessão alterada, grupo aberto durante a preparação, troca de membros ou funções indisponíveis no SDK. O envio normal permanece disponível nesses casos. Os campos são preservados após reiniciar o histórico.
+
+## Verificação local
+
+`npm run bench:first-relay` compara criptografia Signal real com sessões sintéticas, sem conectar ao WhatsApp nem enviar mensagens. Para 1.059 destinatários e três amostras, a mediana local do trecho crítico passou de 79,3 ms para 10,0 ms; a preparação anterior à abertura levou 94,3 ms. Essa redução de 87,4% se refere somente ao trabalho local medido, não ao tempo total até a entrega em produção.
+
+Os testes incluem descriptografia real da primeira rota, descarte do cache durante um reinício, sessão alterada por outra mensagem, uso único, cancelamento entre lotes, retomada normal, preparação sem marcação de entrega e persistência do diagnóstico. Não há garantia de vencer outros participantes: ordem de chegada do evento, rede e processamento do WhatsApp também influenciam.

@@ -29,6 +29,41 @@ function createBot() {
   return { bot, directory };
 }
 
+test("pausar e terminar uma rota preserva preparação silenciosa sem rearmar ou enviar mensagens", async () => {
+  const { bot, directory } = createBot();
+  let preparations = 0, relays = 0;
+  bot.sock = { relayMessage: async () => { relays++; } };
+  bot.runWarmKeepAlive = async () => { preparations++; return true; };
+  try {
+    bot.disableMonitoring();
+    assert.equal(bot.monitoringEnabled, false);
+    assert.ok(bot.warmKeepAliveTimer);
+    assert.equal(bot.warmKeepAliveIntervalMs, 30_000);
+    assert.equal(relays, 0);
+    bot.monitoringEnabled = true; bot.monitoringMode = "target"; bot.sendCycleId = 9;
+    bot.stopMonitoringAfterTargetDispatch(9);
+    assert.equal(bot.monitoringEnabled, false);
+    assert.ok(bot.warmKeepAliveTimer);
+    assert.equal(preparations, 2); assert.equal(relays, 0);
+  } finally { bot.clearWarmKeepAliveTimer(); await bot.logger.flush(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("parada aguarda a preparação antes de fechar a sessão persistente", async () => {
+  const { bot, directory } = createBot(); const calls = []; let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  bot.preparedSenderKeys = { close: async () => { calls.push("draining"); await pending; calls.push("drained"); } };
+  bot.flushCreds = async () => { calls.push("creds"); };
+  bot.flushAuthState = async () => { calls.push("flush"); };
+  bot.closeAuthState = async () => { calls.push("close"); };
+  try {
+    const stopping = bot.stop();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(calls, ["draining"]);
+    release(); await stopping;
+    assert.deepEqual(calls, ["draining", "drained", "creds", "flush", "close"]);
+  } finally { release(); await bot.logger.flush(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("aquecimento interno continua ativo mesmo com monitoramento parado", async () => {
   const { bot, directory } = createBot();
   try {

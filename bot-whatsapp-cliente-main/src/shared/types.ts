@@ -180,6 +180,12 @@ export type RouteDispatchTimeline = {
   secondLaneMode?: "ack-gated" | "speculative";
   dispatchPriority?: DispatchPriorityProfile;
   priorityDelayMs?: number;
+  coordinationWaitMs?: number;
+  senderKeyPreparedRecipients?: number;
+  senderKeyCacheHits?: number;
+  senderKeyCacheMisses?: number;
+  groupEncryptionMs?: number;
+  participantEncryptionMs?: number;
   events: RouteDispatchTimelineEvent[];
 };
 

@@ -527,7 +527,7 @@ export class RouteStore {
       retryUsed: Boolean(input.retryUsed),
       notAcceptableCount: Number.isFinite(Number(input.notAcceptableCount)) ? Number(input.notAcceptableCount) : 0,
       mode: input.mode === "race" ? "race" : "normal",
-      openingSignal: ["group_update", "opening_message", "already_open", "image_ready", "manual", "simulation"].includes(input.openingSignal) ? input.openingSignal : undefined,
+      openingSignal: ["group_update", "opening_message", "already_open", "image_ready", "metadata_check", "manual", "simulation"].includes(input.openingSignal) ? input.openingSignal : undefined,
       internalWarmState: ["cold", "warming", "ready"].includes(input.internalWarmState) ? input.internalWarmState : undefined,
       internalWarmAgeMs: Number.isFinite(Number(input.internalWarmAgeMs)) ? Number(input.internalWarmAgeMs) : undefined,
       authBackend: input.authBackend === "sqlite" ? "sqlite" : input.authBackend === "multi-file" ? "multi-file" : undefined,
@@ -537,6 +537,14 @@ export class RouteStore {
       signalKeyWriteMs: Number.isFinite(Number(input.signalKeyWriteMs)) ? Number(input.signalKeyWriteMs) : undefined,
       signalKeyReadOps: Number.isFinite(Number(input.signalKeyReadOps)) ? Number(input.signalKeyReadOps) : undefined,
       signalKeyWriteOps: Number.isFinite(Number(input.signalKeyWriteOps)) ? Number(input.signalKeyWriteOps) : undefined,
+      coordinationWaitMs: Number.isFinite(Number(input.coordinationWaitMs)) ? Math.max(0, Number(input.coordinationWaitMs)) : undefined,
+      priorityDelayMs: Number.isFinite(Number(input.priorityDelayMs)) ? Math.max(0, Number(input.priorityDelayMs)) : undefined,
+      dispatchPriority: input.dispatchPriority && Number.isFinite(Number(input.dispatchPriority.delayMs)) ? { level: Math.max(0, Number(input.dispatchPriority.level) || 0), delayMs: Math.max(0, Number(input.dispatchPriority.delayMs)) } : undefined,
+      senderKeyPreparedRecipients: Number.isFinite(Number(input.senderKeyPreparedRecipients)) ? Math.max(0, Number(input.senderKeyPreparedRecipients)) : undefined,
+      senderKeyCacheHits: Number.isFinite(Number(input.senderKeyCacheHits)) ? Math.max(0, Number(input.senderKeyCacheHits)) : undefined,
+      senderKeyCacheMisses: Number.isFinite(Number(input.senderKeyCacheMisses)) ? Math.max(0, Number(input.senderKeyCacheMisses)) : undefined,
+      groupEncryptionMs: Number.isFinite(Number(input.groupEncryptionMs)) ? Math.max(0, Number(input.groupEncryptionMs)) : undefined,
+      participantEncryptionMs: Number.isFinite(Number(input.participantEncryptionMs)) ? Math.max(0, Number(input.participantEncryptionMs)) : undefined,
       secondLaneMode: input.secondLaneMode === "speculative" ? "speculative" : input.secondLaneMode === "ack-gated" ? "ack-gated" : undefined,
       events
     };
