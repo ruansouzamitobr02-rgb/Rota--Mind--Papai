@@ -10,7 +10,7 @@ export type SharedOcrOptions = {
   preferCageCrop?: boolean;
 };
 
-const CACHE_VERSION = "route-ocr-dark-filter-table-2026-11-13-v4";
+const CACHE_VERSION = "route-ocr-row-baselines-mn-check-2026-11-27-v5";
 const DEFAULT_TTL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_MAX_ENTRIES = 250;
 const LOCK_TIMEOUT_MS = 120_000;

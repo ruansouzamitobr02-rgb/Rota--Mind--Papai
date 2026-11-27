@@ -6,14 +6,18 @@ import { createWorker } from "tesseract.js";
 import { MonitoredRoute, RomaneioRouteSummary } from "../shared/types";
 import { acquireGlobalOcrCpu } from "./ocrGlobalLock";
 import { getOcrRuntimeBudget } from "../services/runtimeCapacity";
+import { verifyAmbiguousCageLetters } from "./ocrCageLetterVerification";
 
-type OcrWord = {
+export type OcrWord = {
   text: string;
   left: number;
   top: number;
   width: number;
   height: number;
   confidence: number;
+  verifiedCageCode?: string;
+  cageVerificationConfidence?: number;
+  cageLetterConflict?: boolean;
 };
 
 export type OcrLine = {
@@ -52,6 +56,7 @@ export type DetectedRouteCode = {
 };
 
 let tesseractJsWorkerPromise: ReturnType<typeof createWorker> | undefined;
+let tesseractCodeWorkerPromise: ReturnType<typeof createWorker> | undefined;
 let tesseractJsRecognitionQueue: Promise<void> = Promise.resolve();
 let nativeTesseractAvailable: boolean | undefined;
 const OCR_TURBO_MODE = process.env.OCR_TURBO_MODE === "true";
@@ -75,6 +80,14 @@ export function readImageText(imagePath: string) {
 
 export async function readRouteImageOcr(imagePath: string, options: { maxReadings?: number; fastFirst?: boolean; preferCageCrop?: boolean } = {}) {
   const variants: Awaited<ReturnType<typeof createPreprocessedImages>> = [];
+  const finish = async (readings: RouteOcrResult[]) => {
+    const result = combineOcrReadings(readings);
+    try {
+      const checked = await verifyAmbiguousCageLetters(readings, variants, readSingleRouteImageOcr);
+      if (checked.verified || checked.conflicts) result.source += ` + conferencia-MN:${checked.verified}/${checked.conflicts}`;
+    } catch { /* Keep the normal conservative consensus if a focused reading fails. */ }
+    return result;
+  };
 
   try {
     if (options.fastFirst && options.preferCageCrop) {
@@ -86,12 +99,12 @@ export async function readRouteImageOcr(imagePath: string, options: { maxReading
       const firstReadings = firstAttempts.flatMap((attempt) => attempt.reading ? [attempt.reading] : []);
       const firstErrors = firstAttempts.flatMap((attempt) => attempt.error ? [attempt.error] : []);
 
-      if (canUseFastOcrResult(firstReadings)) return combineOcrReadings(firstReadings);
+      if (canUseFastOcrResult(firstReadings)) return await finish(firstReadings);
 
       const remainingLimit = Math.max(0, maxReadings - firstVariants.length);
       if (!remainingLimit) {
         if (!firstReadings.length) throw new Error(firstErrors[0] || "Nenhuma versão da imagem pôde ser analisada.");
-        return combineOcrReadings(firstReadings);
+        return await finish(firstReadings);
       }
 
       const extraCageVariants = cageVariants.slice(firstVariants.length, firstVariants.length + remainingLimit);
@@ -107,7 +120,7 @@ export async function readRouteImageOcr(imagePath: string, options: { maxReading
         errors = [...errors, ...fullAttempts.flatMap((attempt) => attempt.error ? [attempt.error] : [])];
       }
       if (!readings.length) throw new Error(errors[0] || "Nenhuma versão da imagem pôde ser analisada.");
-      return combineOcrReadings(readings);
+      return await finish(readings);
     }
 
     variants.push(...await createPreprocessedImages(imagePath, options.preferCageCrop, "all", options.maxReadings, true));
@@ -119,7 +132,7 @@ export async function readRouteImageOcr(imagePath: string, options: { maxReading
     let errors = attempts.flatMap((attempt) => attempt.error ? [attempt.error] : []);
 
     if (options.fastFirst && fastReadingCount < selectedVariants.length && canUseFastOcrResult(readings)) {
-      return combineOcrReadings(readings);
+      return await finish(readings);
     }
 
     if (fastReadingCount < selectedVariants.length) {
@@ -137,7 +150,7 @@ export async function readRouteImageOcr(imagePath: string, options: { maxReading
     if (!readings.length) {
       throw new Error(errors[0] || "Nenhuma versão da imagem pôde ser analisada.");
     }
-    return combineOcrReadings(readings);
+    return await finish(readings);
   } finally {
     for (const variant of variants) {
       if (!variant.generated) continue;
@@ -306,6 +319,12 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper:
 }
 
 async function readSingleRouteImageOcr(imagePath: string, label: string, psm = 6) {
+  if (label.startsWith("coluna-gaiola-mn")) {
+    // Codes have no Portuguese words. The English alphabet model separates
+    // the condensed M/N glyphs which the word model can read as 1 or N.
+    return readRouteImageOcrWithBinary(imagePath, label, psm)
+      .catch(() => readRouteImageOcrWithTesseractJs(imagePath, label, psm));
+  }
   if (label.startsWith("coluna-gaiola")) {
     return readCageOcrWithFallback(
       () => readRouteImageOcrWithTesseractJs(imagePath, label, psm),
@@ -388,9 +407,11 @@ function readRouteImageOcrWithTesseractJs(imagePath: string, label: string, psm:
     const releaseCpu = await acquireGlobalOcrCpu();
     try {
       const cageOnly = label.startsWith("coluna-gaiola");
-      const worker = await getTesseractJsWorker(cageOnly);
+      const codeCheck = label.startsWith("coluna-gaiola-mn");
+      const worker = await getTesseractJsWorker(cageOnly, codeCheck);
       await worker.setParameters({
-        tessedit_pageseg_mode: String(psm) as any
+        tessedit_pageseg_mode: String(psm) as any,
+        tessedit_char_whitelist: codeCheck ? "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-" : ""
       });
 
       const result = await worker.recognize(
@@ -658,7 +679,13 @@ async function materializeVariants(variants: PreparedOcrVariant[], jobs: Map<str
   return prepared;
 }
 
-function getTesseractJsWorker(_cageOnly = false) {
+function getTesseractJsWorker(_cageOnly = false, codeCheck = false) {
+  if (codeCheck) {
+    if (!tesseractCodeWorkerPromise) tesseractCodeWorkerPromise = createWorker("eng", 1, {
+      logger: () => undefined
+    }).catch(error => { tesseractCodeWorkerPromise = undefined; throw error; });
+    return tesseractCodeWorkerPromise;
+  }
   // Todas as variantes usam português e são executadas em sequência.
   // Um worker único evita carregar duas cópias do mesmo modelo na memória.
   if (!tesseractJsWorkerPromise) {
@@ -679,15 +706,13 @@ export async function warmupRouteOcrEngine() {
 }
 
 export async function shutdownRouteOcrEngine() {
-  const currentWorker = tesseractJsWorkerPromise;
+  const workers = [tesseractJsWorkerPromise, tesseractCodeWorkerPromise];
   tesseractJsWorkerPromise = undefined;
-  if (!currentWorker) return;
-  try {
-    const worker = await currentWorker;
-    await worker.terminate();
-  } catch {
-    // O processo pode ter caído antes de liberar o motor da IA.
-  }
+  tesseractCodeWorkerPromise = undefined;
+  await Promise.all(workers.filter(Boolean).map(async promise => {
+    try { await (await promise!)?.terminate(); }
+    catch { /* The OCR process may already have stopped. */ }
+  }));
 }
 
 export function findConfiguredRouteCode(ocrText: string, routes: string[]) {
@@ -754,7 +779,7 @@ export function findAllConfiguredRouteCodesFromOcr(
 
 export function findAllGaiolaCodesFromOcr(ocr: RouteOcrResult) {
   const variants = ocr.variants?.length ? ocr.variants : [ocr];
-  const byCode = new Map<string, Array<DetectedRouteCode & { variantIndex: number }>>();
+  const byCode = new Map<string, Array<DetectedRouteCode & { variantIndex: number; letterConfirmed?: boolean; letterConflict?: boolean }>>();
 
   for (const [variantIndex, variant] of variants.entries()) {
     const sourceLines = variant.lines.length
@@ -765,7 +790,9 @@ export function findAllGaiolaCodesFromOcr(ocr: RouteOcrResult) {
     for (const line of lines) {
       if (line.confidence < 35) continue;
       const columns = splitLineIntoRouteColumns(line, layout);
-      const code = extractSafeGaiolaCode(line, columns.code) || extractSafeGaiolaCode(line) || extractMisreadLeadingICode(line.text);
+      const originalCode = extractSafeGaiolaCode(line, columns.code) || extractSafeGaiolaCode(line) || extractMisreadLeadingICode(line.text);
+      const letter = getCageLetterEvidence(line.words, originalCode);
+      const code = letter.code;
       if (!code) continue;
       const detected: DetectedRouteCode = {
         route: "",
@@ -777,13 +804,13 @@ export function findAllGaiolaCodesFromOcr(ocr: RouteOcrResult) {
         variantCount: variants.length,
         safeForAutomatic: false
       };
-      byCode.set(code, [...(byCode.get(code) || []), { ...detected, variantIndex }]);
+      byCode.set(code, [...(byCode.get(code) || []), { ...detected, variantIndex, letterConfirmed: letter.verified, letterConflict: letter.conflict }]);
     }
 
     const sourceWords = sourceLines.flatMap((line) => line.words);
     for (const word of sourceWords) {
-      const code = extractStandaloneGaiolaCode(word.text);
-      if (!code || word.confidence < 35) continue;
+      const code = word.verifiedCageCode || extractStandaloneGaiolaCode(word.text);
+      if (!code || (word.cageVerificationConfidence ?? word.confidence) < 35) continue;
       const rowWords = sourceWords.filter((candidate) => {
         const verticalDistance = Math.abs((candidate.top + candidate.height / 2) - (word.top + word.height / 2));
         return verticalDistance <= Math.max(8, word.height * 0.7, candidate.height * 0.7);
@@ -794,12 +821,13 @@ export function findAllGaiolaCodesFromOcr(ocr: RouteOcrResult) {
         code,
         plannedAt: extractPlannedAtCode(row.text),
         line: row.text,
-        confidence: Math.round(Math.min(word.confidence, row.confidence)),
+        confidence: Math.round(Math.min(word.cageVerificationConfidence ?? word.confidence, row.confidence)),
         evidenceCount: 1,
         variantCount: variants.length,
         safeForAutomatic: false
       };
-      byCode.set(code, [...(byCode.get(code) || []), { ...detected, variantIndex }]);
+      const letter = getCageLetterEvidence(row.words, code);
+      byCode.set(code, [...(byCode.get(code) || []), { ...detected, variantIndex, letterConfirmed: letter.verified, letterConflict: letter.conflict }]);
     }
   }
 
@@ -811,19 +839,34 @@ export function findAllGaiolaCodesFromOcr(ocr: RouteOcrResult) {
       if (!current || match.confidence > current.confidence) evidenceByVariant.set(match.variantIndex, match);
     }
     const evidence = [...evidenceByVariant.values()];
-    const { variantIndex: _variantIndex, ...cleanBest } = best;
+    const verifiedLetter = matches.some(item => item.letterConfirmed);
+    const letterConflict = matches.some(item => item.letterConflict);
+    const { variantIndex: _variantIndex, letterConfirmed: _confirmed, letterConflict: _conflict, ...cleanBest } = best;
     return {
       ...cleanBest,
       plannedAt: evidence.find((item) => item.plannedAt)?.plannedAt || cleanBest.plannedAt,
       confidence: evidence.length ? Math.round(Math.min(...evidence.map((item) => item.confidence))) : best.confidence,
-      evidenceCount: evidence.length,
-      variantCount: variants.length,
-      safeForAutomatic: evidence.length >= 2
+      evidenceCount: evidence.length + (verifiedLetter ? 2 : 0),
+      variantCount: variants.length + (verifiedLetter ? 2 : 0),
+      safeForAutomatic: !letterConflict && evidence.length + (verifiedLetter ? 2 : 0) >= 2
     };
   });
 }
 
-function extractStandaloneGaiolaCode(text: string) {
+export function getCageLetterEvidence(words: OcrWord[], code: string) {
+  const related = words.filter(word => {
+    if (word.verifiedCageCode && /^[MN]-\d{1,2}$/.test(word.verifiedCageCode)) {
+      return !code || word.verifiedCageCode.slice(1) === code.slice(1);
+    }
+    const raw = extractStandaloneGaiolaCode(word.text);
+    return word.cageLetterConflict && /^[MNI]-\d{1,2}$/.test(raw) && raw.slice(1) === code.slice(1);
+  });
+  const codes = new Set(related.map(word => word.verifiedCageCode).filter((value): value is string => Boolean(value)));
+  return { code: codes.size === 1 ? [...codes][0] : code, verified: codes.size === 1,
+    conflict: codes.size > 1 || related.some(word => word.cageLetterConflict) };
+}
+
+export function extractStandaloneGaiolaCode(text: string) {
   const normalized = normalizeDuplicatedGaiolaLetter(normalizeOcrToken(text)).toUpperCase().replace(/[–—]/g, "-");
   const match = normalized.match(/^([A-Z|1])\s*([-.:]?)\s*(\d{1,2})$/);
   if (!match) return "";
@@ -1433,6 +1476,8 @@ function extractMisreadLeadingICode(text: string) {
 }
 
 function getGaiolaConfidence(line: OcrLine, code: string) {
+  const verified = line.words.find(word => word.verifiedCageCode === code);
+  if (verified?.cageVerificationConfidence !== undefined) return Math.round(Math.min(line.confidence, verified.cageVerificationConfidence));
   const wanted = code.replace(/[^a-z0-9]/gi, "").toLowerCase();
   const words = [...line.words].sort((left, right) => left.left - right.left);
 

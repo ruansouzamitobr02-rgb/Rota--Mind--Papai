@@ -1,5 +1,6 @@
 import type { MonitoredRoute } from "../shared/types";
 import type { DetectedRouteCode, OcrLine, RouteOcrResult } from "./ocr";
+import { getCageLetterEvidence, extractStandaloneGaiolaCode } from "./ocr";
 import { isCentroNeighborhood } from "../shared/neighborhoodRegion";
 
 export type NeighborhoodSelection = {
@@ -12,7 +13,7 @@ export type NeighborhoodSelection = {
 };
 
 type Row = { text: string; words: OcrLine["words"]; confidence: number; districtText?: string; localityText?: string; trailingCellText?: string; paradas?: number; pacotes?: number };
-type Match = { row: Row; code: string; confidence: number; variant: number; regiao?: string; paradas?: number; pacotes?: number; requiresThreeEvidence?: boolean };
+type Match = { row: Row; code: string; confidence: number; variant: number; regiao?: string; paradas?: number; pacotes?: number; requiresThreeEvidence?: boolean; cageConfirmed?: boolean; cageConflict?: boolean; inferredCode?: boolean };
 
 function hasRowGeometry(row: Row) {
   return row.words.length > 0 && row.words.every((word) =>
@@ -21,9 +22,10 @@ function hasRowGeometry(row: Row) {
 }
 
 function hasStructuredRouteRow(match: Match) {
-  return hasRowGeometry(match.row) && !match.requiresThreeEvidence &&
+  return hasRowGeometry(match.row) && !match.requiresThreeEvidence && !match.inferredCode &&
     Boolean(match.row.districtText || match.row.trailingCellText) &&
-    (match.paradas !== undefined || match.pacotes !== undefined);
+    (match.paradas !== undefined || match.pacotes !== undefined || Boolean(match.row.districtText) && /\bAT[A-Z0-9]{8,}\b/i.test(match.row.text))
+    && (!/^[MN]-/.test(match.code) || match.cageConfirmed || match.confidence >= 65);
 }
 
 function conflictingAtCodes(matches: Match[]) {
@@ -54,14 +56,15 @@ export function findManualRouteCandidatesFromOcr(ocr: RouteOcrResult): DetectedR
   for (const [variant, reading] of variants.entries()) {
     for (const row of readRows(reading)) {
       const exact = [...row.text.matchAll(/(?:^|[\s|;])([A-Z])[-_\u2013\u2014:.\s]*(\d{1,2})(?=$|[\s|;,])/g)];
-      const misreadFour = [...row.text.matchAll(/(?:^|[\s|;])([A-Z])[-_\u2013\u2014:.\s]*(\d)\s*[uU](?=$|[\s|;,])/g)];
+      const misreadFour = [...row.text.matchAll(/(?:^|[\s|;])([A-Z])[-_\u2013\u2014:.\s]*(\d)\s*[uU]4?(?=$|[\s|;,])/g)];
       const codes = new Set([
         ...exact.map((match) => `${match[1].toUpperCase()}-${match[2]}`),
         ...misreadFour.map((match) => `${match[1].toUpperCase()}-${match[2]}4`)
       ]);
       if (codes.size !== 1) continue;
-      const code = [...codes][0];
+      const code = getCageLetterEvidence(row.words, [...codes][0]).code;
       const bairro = String(row.districtText || row.trailingCellText || "").trim();
+      if (bairro && !/\p{L}/u.test(bairro) && !/\bAT[A-Z0-9]{8,}\b/i.test(row.text)) continue;
       const regiao = bairro ? matchPreference(row, { cidade: "", bairro })?.regiao : row.localityText;
       const detection: DetectedRouteCode & { variant: number } = {
         route: bairro || row.text,
@@ -224,7 +227,7 @@ export function selectPreferredNeighborhoodFromOcr(
         confidence: confirmed.length ? Math.round(Math.min(...confirmed.map((match) => match.confidence))) : best.confidence,
         evidenceCount: evidence.size,
         variantCount: variants.length,
-        safeForAutomatic: !regionConflicts.has(code) && !atConflicts.has(code) && (evidence.size >= requiredEvidence || structuralSingleReading)
+        safeForAutomatic: !positioned.some(match => match.cageConflict) && !regionConflicts.has(code) && !atConflicts.has(code) && (evidence.size >= requiredEvidence || structuralSingleReading)
       };
       return detection;
     });
@@ -329,7 +332,7 @@ function matchPreference(row: Row, preference: MonitoredRoute, ignoreRegion = fa
   // 1/l/|/II into I or truncate a three-digit value.
   const codeMatches = [...row.text.matchAll(/(?:^|[\s|;])([A-Z])[-_\u2013\u2014:.\s]*(\d{1,2})(?=$|[\s|;,])/g)];
   const suspiciousCodes = [...row.text.matchAll(/(?:^|[\s|;])([1|]|II|l|i)\s*[-_\u2013\u2014:.]\s*(\d{1,3})(?=$|[\s|;,])/g)];
-  const misreadFourCodes = [...row.text.matchAll(/(?:^|[\s|;])([A-Z])[-_\u2013\u2014:.\s]*(\d)\s*[uU](?=$|[\s|;,])/g)];
+  const misreadFourCodes = [...row.text.matchAll(/(?:^|[\s|;])([A-Z])[-_\u2013\u2014:.\s]*(\d)\s*[uU]4?(?=$|[\s|;,])/g)];
   let code = codeMatches.length === 1 && suspiciousCodes.length === 0
     ? `${codeMatches[0][1].toUpperCase()}-${codeMatches[0][2]}` : "";
   // In the narrow route column Tesseract frequently reads I-24 as 1-24,
@@ -354,6 +357,8 @@ function matchPreference(row: Row, preference: MonitoredRoute, ignoreRegion = fa
     code = `I-${malformedSingleI[2]}`;
     requiresThreeEvidence = true;
   }
+  const cageEvidence = getCageLetterEvidence(row.words, code);
+  code = cageEvidence.code;
   const lastCode = codeMatches[codeMatches.length - 1];
   const recoveredCodeEnd = malformedSingleI?.index !== undefined
     ? malformedSingleI.index + malformedSingleI[0].length : undefined;
@@ -440,9 +445,10 @@ function matchPreference(row: Row, preference: MonitoredRoute, ignoreRegion = fa
     // consensus because of the I/1 glyph alone.
     if (codeBackedByAt && /^(?:(?:I|1|l|\|)\s*[-_:.]?|-{1,2})\s*\d{1,2}$/i.test(word.text)) return false;
     return normalizeNeighborhoodIdentity(word.text).split(" ").some((token) => relevant.has(token));
-  }).map((word) => word.confidence);
+  }).map((word) => word.cageVerificationConfidence ?? word.confidence);
   const confidence = Math.round(Math.min(row.confidence, ...(wordConfidence.length ? wordConfidence : [row.confidence])));
-  return { code, confidence, ...(regiao ? { regiao } : {}), ...extractQuantitiesAfterAt(row), requiresThreeEvidence };
+  return { code, confidence, ...(regiao ? { regiao } : {}), ...extractQuantitiesAfterAt(row), requiresThreeEvidence,
+    cageConfirmed: cageEvidence.verified, cageConflict: cageEvidence.conflict, inferredCode: Boolean(misreadFourCode && !codeMatches.length) };
 }
 
 function extractQuantitiesAfterAt(row: Row | string) {
@@ -594,8 +600,13 @@ function readRows(reading: RouteOcrResult): Row[] {
     const compatible = groups.filter((group) => group.every((existing) => {
       const overlap = Math.min(existing.top + existing.height, word.top + word.height) - Math.max(existing.top, word.top);
       const distance = Math.abs(existing.top + existing.height / 2 - word.top - word.height / 2);
-      return overlap >= Math.min(existing.height, word.height) * 0.6 &&
-        distance <= Math.min(existing.height, word.height) * 0.4;
+      // Ascenders in AT/cage cells and descenders in names such as Parque
+      // have different boxes on the same baseline. A 0.4-height centre limit
+      // split "Parque" from its own row by less than one pixel in real tables.
+      // Still require overlap with EVERY existing word, so tall grid noise
+      // cannot bridge neighbouring rows.
+      return overlap >= Math.min(existing.height, word.height) * 0.5 &&
+        distance <= Math.min(existing.height, word.height) * 0.55;
     }));
     if (compatible.length === 1) compatible[0].push(word);
     else groups.push([word]);
@@ -606,6 +617,9 @@ function readRows(reading: RouteOcrResult): Row[] {
   // labels cuts through long CLUSTER values and even includes SPR in CLUSTER.
   const cellStart = (header: OcrLine["words"][number]) => header.left - Math.min(10, header.height * 0.5);
   const districtStart = districtHeader ? cellStart(districtHeader) : undefined;
+  const idHeader = districtHeader && withWords.find(word => /^id$/i.test(word.text.trim()) && word.left > districtHeader.left + districtHeader.width
+    && Math.abs(word.top + word.height / 2 - districtHeader.top - districtHeader.height / 2) <= Math.min(word.height, districtHeader.height) * 0.6);
+  const districtEnd = idHeader ? cellStart(idHeader) : undefined;
   const clusterHeaders = withWords.filter((word) => /^(cluster|regiao)$/.test(normalizeNeighborhoodIdentity(word.text)));
   const localityHeaders = clusterHeaders.length ? clusterHeaders : withWords.filter((word) => /^cidade$/.test(normalizeNeighborhoodIdentity(word.text)));
   const localityHeader = localityHeaders.length === 1 ? localityHeaders[0] : undefined;
@@ -616,9 +630,18 @@ function readRows(reading: RouteOcrResult): Row[] {
   return groups.map((words) => {
     const sorted = [...words].sort((left, right) => left.left - right.left);
     const quantities = inferRowQuantities(sorted, metricColumns);
-    return { text: sorted.map((word) => word.text).join(" "), words: sorted,
+    const rowAt = sorted.find(word => /^AT[A-Z0-9]{8,}$/i.test(word.text));
+    const text = sorted.map(word => {
+      // Link fonts also yield k-15 / kK-31. Canonicalize only complete cage
+      // cells before the AT; a lowercase l remains ambiguous with I.
+      if (rowAt && word.left < rowAt.left && /^[A-Za-z]/.test(word.text) && !/^l[-_–—:.\s]*\d/.test(word.text)) {
+        return extractStandaloneGaiolaCode(word.text) || word.text;
+      }
+      return word.text;
+    }).join(" ");
+    return { text, words: sorted,
       districtText: districtStart !== undefined && sorted[0].top > districtHeader!.top + districtHeader!.height
-        ? sorted.filter((word) => word.left + word.width / 2 >= districtStart).map((word) => word.text).join(" ") : undefined,
+        ? sorted.filter((word) => word.left + word.width / 2 >= districtStart && (districtEnd === undefined || word.left + word.width / 2 < districtEnd)).map((word) => word.text).join(" ") : undefined,
       localityText: localityStart !== undefined && sorted[0].top > localityHeader!.top + localityHeader!.height
         ? sorted.filter((word) => {
           const center = word.left + word.width / 2;
