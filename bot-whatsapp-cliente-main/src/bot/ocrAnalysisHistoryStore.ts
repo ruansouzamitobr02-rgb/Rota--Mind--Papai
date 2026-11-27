@@ -8,8 +8,9 @@ export class OcrAnalysisHistoryStore {
   private items: OcrRouteSelectionState[];
   private saveTimer?: NodeJS.Timeout;
   private saveChain: Promise<void> = Promise.resolve();
+  private automaticWriteDeadline = 0;
 
-  constructor(private readonly filePath: string) {
+  constructor(private readonly filePath: string, private readonly deferAutomaticWrite: () => boolean = () => false) {
     this.items = this.load();
   }
 
@@ -31,7 +32,7 @@ export class OcrAnalysisHistoryStore {
     if (["idle", "analyzing"].includes(selection.status)) return;
     const key = selection.analysisId || selection.processedAt;
     if (!key) return;
-    const snapshot = JSON.parse(JSON.stringify(selection)) as OcrRouteSelectionState;
+    const snapshot = structuredClone(selection);
     this.items = [snapshot, ...this.items.filter((item) => (item.analysisId || item.processedAt) !== key)].slice(0, MAX_ANALYSES);
     this.scheduleSave();
   }
@@ -44,7 +45,8 @@ export class OcrAnalysisHistoryStore {
   flush() {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = undefined;
-    const snapshot = JSON.parse(JSON.stringify(this.items)) as OcrRouteSelectionState[];
+    this.automaticWriteDeadline = 0;
+    const snapshot = structuredClone(this.items);
     this.saveChain = this.saveChain.catch(() => undefined).then(async () => {
       let previous: unknown;
       try { previous = JSON.parse(await fs.promises.readFile(this.filePath, "utf8")); } catch { /* Keep a valid existing backup. */ }
@@ -54,12 +56,17 @@ export class OcrAnalysisHistoryStore {
     return this.saveChain;
   }
 
-  private scheduleSave() {
+  private scheduleSave(delayMs = 100) {
+    if (!this.automaticWriteDeadline) this.automaticWriteDeadline = Date.now() + 2000;
     if (this.saveTimer) return;
     this.saveTimer = setTimeout(() => {
       this.saveTimer = undefined;
+      if (this.deferAutomaticWrite() && Date.now() < this.automaticWriteDeadline) {
+        this.scheduleSave(25);
+        return;
+      }
       void this.flush().catch(() => console.error("Não foi possível persistir o histórico de análises."));
-    }, 100);
+    }, delayMs);
     this.saveTimer.unref?.();
   }
 }

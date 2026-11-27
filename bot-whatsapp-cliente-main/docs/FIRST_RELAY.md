@@ -45,3 +45,9 @@ A presença é secundária: uma resposta lenta, cujo limite já era de 2,5 segun
 O watchdog reutiliza os pings de diagnóstico existentes, sem aumentar a frequência nem enviar mensagens de teste. Só solicita recuperação quando há pelo menos três falhas e 45 segundos sem tráfego recebido. Não reconecta por RTT alto isolado. A recuperação é impedida durante disparo, leitura de imagem, grupo aberto e nos 15 segundos após uma abertura. Há intervalo mínimo de cinco minutos entre recuperações preventivas. O fechamento normal do SDK reconecta e mantém a recuperação de rotas já existente, sem apagar sessões ou chamar `stop()`/`restart()` do bot.
 
 `BOT_SOCKET_WATCHDOG=false` desativa somente a recuperação preventiva. O painel registra tempo desde o último tráfego, falhas de verificação e recuperações da conexão no diagnóstico de cada disparo; esses campos permanecem após reiniciar.
+
+## Histórico e painel durante o primeiro envio
+
+Os timers de histórico de rotas, análises com prévias e telemetria aguardam a pista crítica de envio ser liberada antes de iniciar gravações grandes. O adiamento tem limite de dois segundos a partir da primeira alteração pendente, sem renovar o prazo quando chega outra alteração. `flush()` explícito em parada, backup ou restauração continua gravando imediatamente. A fila compacta de recuperação de disparos mantém sua gravação normal, inclusive durante a corrida, preservando a proteção contra repetição após reiniciar.
+
+As cópias independentes de análises usam `structuredClone`, evitando uma conversão inteira para JSON e de volta antes de começar a gravação. O aviso leve de envio crítico também é emitido quando já existe um timer de painel agendado. O supervisor marca a pista crítica antes de encaminhar o pedido de coordenação ao servidor; a verificação financeira e as regras de prioridade continuam obrigatórias.

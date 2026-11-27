@@ -45,8 +45,9 @@ export class TelemetryStore {
   private events?: DispatchTelemetryEvent[];
   private flushTimer?: NodeJS.Timeout;
   private dirty = false;
+  private automaticWriteDeadline = 0;
 
-  constructor(private readonly filePath: string) {}
+  constructor(private readonly filePath: string, private readonly deferAutomaticWrite: () => boolean = () => false) {}
 
   all() {
     return [...this.getEvents()];
@@ -165,14 +166,20 @@ export class TelemetryStore {
     }
     writeJsonAtomic(this.filePath, events);
     this.dirty = false;
+    this.automaticWriteDeadline = 0;
   }
 
   private scheduleSave(delayMs = 250) {
+    if (!this.dirty) this.automaticWriteDeadline = Date.now() + 2000;
     this.dirty = true;
     if (this.flushTimer) return;
     this.flushTimer = setTimeout(() => {
       this.flushTimer = undefined;
       if (!this.dirty) return;
+      if (this.deferAutomaticWrite() && Date.now() < this.automaticWriteDeadline) {
+        this.scheduleSave(25);
+        return;
+      }
       try {
         this.saveNow(this.getEvents());
       } catch {

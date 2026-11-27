@@ -30,6 +30,19 @@ async function waitFor(predicate, timeoutMs = 5000) {
   throw new Error("Condição do teste não foi atendida dentro do prazo.");
 }
 
+test("pedido de envio protege o processo antes de notificar a coordenação e libera com o snapshot final", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bot-critical-gate-"));
+  const bot = new BotProcessProxy(optionsFor(directory, "fixture@teste.com"));
+  try {
+    await bot.ready(); let protectedAtRequest = false;
+    bot.on("dispatch-gate-request", () => { protectedAtRequest = bot.isCriticalDispatchActive(); });
+    bot.handleMessage({ type: "dispatch-gate-request", id: "fixture", clientEmail: "fixture@teste.com", groupKey: "fixture@g.us", eventDetectedAt: Date.now() });
+    assert.equal(protectedAtRequest, true);
+    await bot.setMessageCodes(["D-16"]);
+    assert.equal(bot.isCriticalDispatchActive(), false);
+  } finally { await bot.shutdown(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("cada cliente executa em processo próprio e mantém estado independente", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bot-process-isolation-"));
   const firstDirectory = path.join(root, "first");

@@ -336,10 +336,11 @@ export class BotService extends EventEmitter {
     this.authDir = options.authDir || path.resolve(process.cwd(), "auth_info");
     this.deferSnapshotPayload = Boolean(options.deferSnapshotPayload);
     this.configStore = new ConfigStore(options.configPath);
-    this.routeStore = new RouteStore(options.routeStorePath || path.resolve(process.cwd(), "route_history.json"));
+    const deferHistoryWrite = () => this.criticalDispatchInProgress;
+    this.routeStore = new RouteStore(options.routeStorePath || path.resolve(process.cwd(), "route_history.json"), deferHistoryWrite);
     this.dispatchQueueStore = new DispatchQueueStore(options.dispatchQueuePath || path.resolve(process.cwd(), "dispatch_queue.json"));
-    this.telemetryStore = new TelemetryStore(options.telemetryPath || path.resolve(process.cwd(), "dispatch_telemetry.json"));
-    this.ocrAnalysisHistoryStore = new OcrAnalysisHistoryStore(options.ocrAnalysisHistoryPath || path.join(path.dirname(this.configStore.path), "ocr_analysis_history.json"));
+    this.telemetryStore = new TelemetryStore(options.telemetryPath || path.resolve(process.cwd(), "dispatch_telemetry.json"), deferHistoryWrite);
+    this.ocrAnalysisHistoryStore = new OcrAnalysisHistoryStore(options.ocrAnalysisHistoryPath || path.join(path.dirname(this.configStore.path), "ocr_analysis_history.json"), deferHistoryWrite);
     this.romaneioStore = options.romaneioDir ? new RomaneioStore(options.romaneioDir) : undefined;
     this.logger = new BotLogger(() => this.emitSnapshot(), options.logStorePath || path.resolve(process.cwd(), "bot_logs.json"));
     this.statusEventsPath = path.join(path.dirname(options.routeStorePath || path.resolve(process.cwd(), "route_history.json")), "status_events.json");

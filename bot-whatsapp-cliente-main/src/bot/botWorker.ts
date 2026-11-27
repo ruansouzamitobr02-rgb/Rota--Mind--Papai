@@ -81,12 +81,14 @@ function send(message: BotWorkerOutgoingMessage) {
 }
 
 function scheduleSnapshot() {
-  if (!bot || snapshotTimer) return;
+  if (!bot) return;
   const critical = bot.isCriticalDispatchActive();
   if (critical && !reportedCritical) {
     reportedCritical = true;
     send({ type: "snapshot-dirty", critical: true });
   }
+  // An already scheduled panel update must not delay the critical signal.
+  if (snapshotTimer) return;
   snapshotTimer = setTimeout(() => {
     snapshotTimer = undefined;
     if (!bot) return;

@@ -252,6 +252,9 @@ export class BotProcessProxy extends EventEmitter {
       return;
     }
     if (message.type === "dispatch-gate-request") {
+      // Gate requests precede the throttled snapshot. Protect the worker's
+      // first-send window before the parent evaluates the request/fanout.
+      this.critical = true;
       this.emit("dispatch-gate-request", message);
       return;
     }

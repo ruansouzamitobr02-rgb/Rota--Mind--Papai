@@ -10,8 +10,9 @@ export class RouteStore {
   private routes?: RouteDispatch[];
   private flushTimer?: NodeJS.Timeout;
   private dirty = false;
+  private automaticWriteDeadline = 0;
 
-  constructor(private readonly filePath: string) {}
+  constructor(private readonly filePath: string, private readonly deferAutomaticWrite: () => boolean = () => false) {}
 
   all(): RouteDispatch[] {
     return [...this.getRoutes()];
@@ -322,6 +323,7 @@ export class RouteStore {
     }
     writeJsonAtomic(this.filePath, routes);
     this.dirty = false;
+    this.automaticWriteDeadline = 0;
   }
 
   private hasValidRouteFile(filePath: string) {
@@ -334,11 +336,18 @@ export class RouteStore {
   }
 
   private scheduleSave(delayMs = 250) {
+    if (!this.dirty) this.automaticWriteDeadline = Date.now() + 2000;
     this.dirty = true;
     if (this.flushTimer) return;
     this.flushTimer = setTimeout(() => {
       this.flushTimer = undefined;
       if (!this.dirty) return;
+      // A bounded pause keeps large JSON/backup work away from the first
+      // relay. Explicit flush() still persists immediately on stop/backup.
+      if (this.deferAutomaticWrite() && Date.now() < this.automaticWriteDeadline) {
+        this.scheduleSave(25);
+        return;
+      }
       try {
         this.saveNow(this.getRoutes());
       } catch {
