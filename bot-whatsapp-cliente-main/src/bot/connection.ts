@@ -1657,18 +1657,8 @@ export class BotService extends EventEmitter {
     }
 
     if (label === "grupo alvo") {
-      const currentUserIds = this.getCurrentUserIds();
-      const participant = metadata.participants?.find((item: any) => {
-        const id = String(item.id || "");
-        const number = id.split(":")[0].split("@")[0];
-        return currentUserIds.includes(id) || currentUserIds.includes(`${number}@s.whatsapp.net`);
-      });
-
-      if (!participant) {
-        this.currentUserInTargetGroup = false;
+      if (!this.updateMembershipFromMetadata(jid, metadata)) {
         this.logger.warning("A conta conectada não está no grupo alvo. Verifique a participação antes de enviar.");
-      } else {
-        this.currentUserInTargetGroup = true;
       }
 
       this.groupState = metadata.announce === true ? "closed" : "open";
@@ -5102,21 +5092,11 @@ export class BotService extends EventEmitter {
     } else if (metadata?.announce === false) {
       this.groupState = "open";
     }
-    const currentUserIds = this.getCurrentUserIds();
-    const currentUserNumbers = currentUserIds.map((id) => id.split(":")[0].split("@")[0]).filter(Boolean);
-    const participant = metadata?.participants?.find((item: any) => {
-      const id = String(item.id || "");
-      const number = id.split(":")[0].split("@")[0];
-      return currentUserIds.includes(id) || currentUserNumbers.includes(number);
-    });
-
-    if (!participant) {
-      this.currentUserInTargetGroup = false;
+    if (!this.updateMembershipFromMetadata(activeGroup.jid, metadata)) {
       this.logger.warning(`A conta conectada não apareceu na lista do ${activeGroup.label}. Verifique se ela ainda está no grupo.`);
       return false;
     }
 
-    this.currentUserInTargetGroup = true;
     this.prepareSendPlan();
     if (shouldRefreshFullMetadata) {
       await Promise.all([
@@ -5652,6 +5632,17 @@ export class BotService extends EventEmitter {
       .filter(Boolean);
   }
 
+  private updateMembershipFromMetadata(jid: string, metadata: any) {
+    if (jid !== this.getActiveMonitoringGroup().jid || (metadata?.id && metadata.id !== jid)) return this.currentUserInTargetGroup;
+    // Compare actual PN/LID identities, removing only device suffixes. Bare
+    // digits from different address domains do not identify the same account.
+    const canonical = (value: unknown) => String(value || "").trim().toLowerCase().replace(/:\d+(?=@)/, "");
+    const ownIds = new Set(this.getCurrentUserIds().map(canonical));
+    this.currentUserInTargetGroup = Array.isArray(metadata?.participants) && metadata.participants.some((participant: any) =>
+      [participant?.id, participant?.phoneNumber, participant?.lid].some(id => Boolean(id) && ownIds.has(canonical(id))));
+    return this.currentUserInTargetGroup;
+  }
+
   private refreshGroupMetadata(jid: string): Promise<any> {
     const socket = this.sock, generation = this.warmGeneration;
     const existing = this.metadataRequests.get(jid);
@@ -5673,6 +5664,7 @@ export class BotService extends EventEmitter {
       }
       if (metadata) {
         this.groupMetadataCache.set(jid, metadata);
+        this.updateMembershipFromMetadata(jid, metadata);
       }
 
       return metadata;
